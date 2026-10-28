@@ -1,0 +1,19 @@
+{
+  "name": "localfold-pdf",
+  "version": "2.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A self-hosted PDF workspace that keeps document processing on your machine.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test --test-concurrency=1"
+  },
+  "dependencies": {
+    "pdf-lib": "^1.17.1",
+    "playwright-core": "^1.62.1",
+    "tesseract.js": "^7.0.0"
+  }
+}

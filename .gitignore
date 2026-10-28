@@ -1,0 +1,25 @@
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Engines are installed by setup-engines.ps1; keep their OCR license notice.
+runtime/*
+!runtime/tessdata/
+runtime/tessdata/*
+!runtime/tessdata/LICENSE
+
+# Local document outputs, screenshots, and execution logs.
+validation/
+uploads/
+downloads/
+*.log
+npm-debug.log*
+.DS_Store
+
+# Local credentials and editor state.
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
