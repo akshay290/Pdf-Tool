@@ -1,6 +1,6 @@
 # LocalFold 2.1
 
-LocalFold is a free, self-hosted PDF workspace for Windows localhost. Its **26 tools implement at least part of 30 capabilities** in the user's 35-item checklist. See [FEATURE-COVERAGE.md](FEATURE-COVERAGE.md) for each capability's scope and the five remaining gaps. It does not claim complete iLovePDF or Smallpdf feature parity.
+LocalFold is a free, self-hosted PDF workspace for Windows localhost. Its **28 tools implement at least part of 30 capabilities** in the user's 35-item checklist. See [FEATURE-COVERAGE.md](FEATURE-COVERAGE.md) for each capability's scope and the five remaining gaps. It does not claim complete iLovePDF or Smallpdf feature parity.
 
 Open [http://127.0.0.1:4173/](http://127.0.0.1:4173/) after starting the app. The frontend and document APIs use the same loopback server. Uploaded documents are processed on the machine hosting LocalFold, with no paid document API, account, analytics, or remote frontend assets. Public webpage capture contacts the public URLs and resources you choose; ordinary document processing works offline once the engines are installed.
 
@@ -29,13 +29,14 @@ Initial setup needs internet access. Later processing uses installed local engin
 
 The default address is 127.0.0.1:4173; PORT can select another local port. Optional executable overrides are LOCALFOLD_PYTHON, LOCALFOLD_BROWSER, and LOCALFOLD_LIBREOFFICE. See [DEPENDENCIES.md](DEPENDENCIES.md) for versions, runtime folders, license notices, and source information. Public hosting, accounts, billing, and production deployment are not configured.
 
-## The 26 tools
+## The 28 tools
 
 | Area | Tools and working scope |
 | --- | --- |
 | Pages | Merge, Split, Rotate, Arrange, Crop, Watermark, Page numbers, Images to PDF. Arrange uses thumbnails and drag and drop, supports removal, duplication, individual rotation, and insertion from other PDFs. Crop supports a selected rectangle or equal margins. Watermarks use text or an image. |
 | Editing and signatures | Edit PDF, PDF forms, Sign PDF. Place text, shapes, highlights, and images on a page preview; replace supported existing text objects. Create and fill supported form fields. Upload, draw, or type a visual signature and position it on the page. |
 | Maintenance and security | Compress, Repair, Flatten, Remove metadata, Protect, Unlock. Compression accepts a target maximum size in KB or MB, alongside lossless and raster presets. Protection uses AES-256; unlocking requires the correct existing password. |
+| Images | Compress images, Resize images. Keep a maximum file size, set pixel or print dimensions, and preserve supported transparency and animation locally. |
 | Extraction and comparison | PDF to images, Extract text/Markdown, Compare PDFs. Export rendered pages or embedded images in a ZIP. Download text or structured Markdown with optional image assets. Compare text or create a visual comparison ZIP with an HTML report and difference images. |
 | Conversion | HTML/Web to PDF, Office to PDF, PDF to Word, PDF to PowerPoint, PDF to Excel. Local LibreOffice handles DOC/DOCX, XLS/XLSX, and PPT/PPTX. PDF exports recover Word layout, editable slide text, and detected spreadsheet tables. |
 | OCR | Make scans searchable in English, Hindi, Spanish, French, German, or Portuguese, up to 50 pages. PDF-to-Office tools can run OCR before conversion. |
@@ -44,9 +45,23 @@ The default address is 127.0.0.1:4173; PORT can select another local port. Optio
 
 The Compress PDF form starts with a maximum-size input. Choose KB or MB, enter the size required by your upload limit, and compress. Units are decimal: 500 KB and 0.5 MB both mean 500,000 bytes.
 
-Target mode preserves an original already below the maximum, tries lossless cleanup, then recompresses eligible embedded images while retaining text and forms. If needed, it tries a bounded raster search with a minimum of 72 DPI and JPEG quality 35. Raster fallback converts pages into images and removes selectable text and interactive forms. That fallback supports up to 40 pages.
+Target mode preserves an original already below the maximum, tries lossless cleanup, then recompresses eligible embedded images while retaining text and forms. If needed, it tries a bounded raster search with a minimum of 72 DPI and JPEG quality 35. Raster fallback converts pages into images and removes selectable text and interactive forms. Target mode now processes raster pages individually, without the previous 40-page cutoff. It limits each page to 12 million rendered pixels and a candidate to 120 million pixels, with a 70-second/24-trial search budget. Balanced/Small presets retain their separate 40-page limit.
 
 The download reports its actual size and whether it reached the maximum. An impossible target produces a clearly marked closest available result, never a false success or padded file. Valid targets range from 1,000 to 16,777,216 bytes; results never intentionally exceed the input size. Preset compression levels remain under Advanced.
+
+## Compress images to a target size
+
+Choose **Compress images**, upload one image (up to 16 MiB), enter a maximum in decimal KB/MB and choose Auto or JPEG, PNG, WebP or AVIF output. Common raster inputs include JPEG, PNG/APNG, WebP, AVIF, HEIC/HEIF, GIF, BMP, TIFF, ICO and JPEG 2000. Additional installed raster decoders are supported; SVG/vector and camera RAW files are not supported universally. PSD reads the merged raster composite, without editable layers.
+
+The compressor keeps an original already within the maximum, then tries pixel-preserving encodings and full-resolution quality searches before proportional Lanczos resizing. Auto compares tested decoded candidates for fidelity and retains transparency and supported animation/pages. Requests that would discard transparency or frames are rejected. Animation format changes are refused when looping, timing or poster behavior cannot be preserved. Use Auto for multipage TIFF/HEIF. Animated AVIF is retained unchanged when the installed decoder cannot expose its loop setting reliably; a missed target is reported honestly.
+
+Image-only limits are 50 million pixels per frame, 60 million across frames, 30,000 pixels per side, 120 frames/pages, 52 encoding attempts and a 65-second search budget. JPEG/WebP/AVIF quality search has a floor of 50; resizing stops before a 64-pixel long edge. Results report actual bytes, target status, dimensions, format and resizing. An impossible maximum returns the closest tested result; no universal target or quality guarantee is claimed. Auto avoids output inflation; an explicitly requested format conversion may be larger if the target cannot be reached.
+
+Re-encoding applies EXIF orientation, retains supported color profiles and removes EXIF/GPS metadata. A byte-identical original retains its metadata. Format conversion can change bit depth and specialized format features. This addition does not alter the file rules of other tools.
+
+## Resize images
+
+Choose **Resize image**, upload one supported raster image (up to 16 MiB), and enter the requested width and height in pixels or centimetres. Centimetre dimensions use a selectable print resolution from 36 to 1200 DPI. Keep the aspect ratio or request exact dimensions, then choose Auto or JPEG, PNG, WebP or AVIF output. An optional maximum file size changes the encoding search only: output pixel dimensions stay fixed, and an unreachable target is reported without silently shrinking the image. Supported animation and multipage inputs retain their frames or pages when their output format permits it.
 
 ## Conversion details and limits
 
@@ -73,7 +88,7 @@ Five checklist features remain absent: **a dedicated exact-copy tool, PDF/A conv
 
 ## Validation
 
-The complete regression run passed **100 tests: 100 passed, 0 failed**. After the final interface fixes, a separate frontend run passed **32 checks with 0 failures**. These runs overlap. Tests cover core operations, APIs, visual workflows, real Office containers, modern and legacy Office conversion, multilingual OCR, structured extraction, and image comparison. Browser checks also exercise page arrangement/rotation, area cropping, and supported existing-text replacement with downloaded results.
+The 30 October compression update passed **141 unique checks** across a full 138-test regression run and a final 61-test focused run covering later compression adjustments; these runs overlap. Both completed with zero failures. Tests include existing PDF tools, real Office conversions, OCR, new image codecs, transparency, animation playback/posters, high-resolution inputs, target-size output and text/form preservation. Synthetic image upload/download was verified in the browser; final PDF output was reopened, text-checked and rendered with Poppler. Earlier browser validation also covered organization, crop and supported text replacement.
 
 See [VALIDATION.md](VALIDATION.md) for the final recorded test and browser evidence. To rerun the suite in the installed environment:
 
@@ -86,4 +101,3 @@ npm test
 The official rea-agents 6.7.0 CLI inspected four public iLovePDF page states during development. LocalFold is independently implemented using open-source libraries; it does not contain iLovePDF's private server code, branding, or proprietary processing services. REA is a development reference tool and is not required to run the app.
 
 LocalFold source uses the MIT license. Dependency licenses remain applicable, including LibreOffice's separate license and source-availability requirements. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [DEPENDENCIES.md](DEPENDENCIES.md).
-

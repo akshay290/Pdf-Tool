@@ -2,6 +2,18 @@
 
 This records checks completed during development. Generated logs, screenshots and sample PDF outputs are retained in the local workspace and excluded from the source repository. Run `npm test` after installing the dependencies to check your environment.
 
+## Compression update — 30 October 2026
+
+Only compression and its integration changed. Added target-size raster image compression and the HEIC/HEIF codec, plus longer-PDF processing and embedded-image downsampling before page rasterization. Existing PDF presets and unrelated operations retain their previous contracts.
+
+- Full regression run: **138 passed, 0 failed**. Final compression/API/frontend run after animation and interface adjustments: **61 passed, 0 failed**. Together these cover **141 unique current test names**, with no missing tests. The runs overlap and are not 199 distinct tests.
+- A synthetic PNG was uploaded through the browser and downloaded as a valid WebP: **1,187,975 → 115,558 bytes**, meeting a 120,000-byte maximum at the original **1280 × 960** dimensions.
+- A synthetic PDF compressed **3,705,621 → 346,386 bytes**, meeting a 350,000-byte maximum using embedded-image downsampling (scale 0.7, JPEG 53). Selectable text was verified and the final output rendered with Poppler. Text/forms/page placement are covered by the dedicated regression fixture.
+- Real-codec regressions cover HEIC/HEIF, 12 common raster input formats, transparency, EXIF orientation/ICC, GIF timing/finite and play-once loops, APNG poster behavior, multipage TIFF, 16-bit grayscale precision, 48 MP inputs and honest impossible targets. Unsupported playback-changing conversions reject clearly.
+- `pip check`, JavaScript/Python syntax checks and whitespace checks (allowing existing Windows CRLF) passed. Existing package versions were retained; only pillow-heif 1.8.1 was added. Its OSV check returned no matching package advisory records at verification time. Native bundled-library security and the previously recorded readiness audit are separate concerns.
+
+Saved logs, synthetic visual evidence and the update summary are in the sibling `../compression-update-2026-10-30/` folder. Earlier validation records follow.
+
 ## Target-size compression — 28 October 2026
 
 - **54 focused checks passed:** 48 API, frontend and existing-PDF checks, plus six target-compression engine cases. These checks overlap earlier regression coverage.

@@ -15,7 +15,7 @@ Inspected on 24 October 2026. LocalFold's original application source uses the M
 
 OCR models for English (`eng`), Hindi (`hin`), Spanish (`spa`), French (`fra`), German (`deu`), and Portuguese (`por`) live in `runtime/tessdata`, from the official [tessdata_fast project](https://github.com/tesseract-ocr/tessdata_fast). Their Apache-2.0 license is retained as `runtime/tessdata/LICENSE`. The application sets local worker, core, and model paths, so processing does not request an OCR model from a CDN.
 
-On 27 October 2026, all six model checksums were verified against upstream revision `87416418657359cb625c412a48b6e1d6d41c29bd`. `setup-engines.ps1` pins this revision and checks the models against `python/ocr-models.json`. Copies of 62 installed JavaScript and Python dependency notice files are also preserved in `licenses/`.
+On 27 October 2026, all six model checksums were verified against upstream revision `87416418657359cb625c412a48b6e1d6d41c29bd`. `setup-engines.ps1` pins this revision and checks the models against `python/ocr-models.json`. Copies of 64 installed JavaScript and Python dependency notice files are also preserved in `licenses/`.
 
 Playwright browser binaries have their own license files, separate from Playwright's license. The existing Windows browser cache supplies the local Chromium installation; browsers are not embedded in LocalFold's source. Retain the browser's original notices if you package a browser with a distribution.
 
@@ -28,6 +28,7 @@ Playwright browser binaries have their own license files, separate from Playwrig
 | pypdf | 6.10.0 | BSD-3-Clause | [Source](https://github.com/py-pdf/pypdf), compression, encryption and PDF structure |
 | pypdfium2 | 5.14.0 | Apache-2.0 / BSD-3-Clause plus PDFium dependency notices | [Source and licensing](https://github.com/pypdfium2-team/pypdfium2#licensing), rendering and text extraction |
 | Pillow | 12.3.0 | MIT-CMU plus bundled image library notices | [Source](https://github.com/python-pillow/Pillow), image encoding |
+| pillow-heif | 1.8.1 | BSD-3-Clause source; GPLv2 binary wheel with component notices | [Source](https://github.com/bigcat88/pillow_heif), HEIC/HEIF input for image compression |
 | ReportLab | 4.4.9 | BSD plus supplied font notices | [Project](https://www.reportlab.com/opensource/), generated PDF content |
 | cryptography | 50.0.2 | Apache-2.0 OR BSD-3-Clause plus bundled native notices | [Source](https://github.com/pyca/cryptography), AES encryption support |
 | python-docx | 1.2.0 | MIT | [Source](https://github.com/python-openxml/python-docx), editable Word text exports |
@@ -39,6 +40,10 @@ Playwright browser binaries have their own license files, separate from Playwrig
 Installed supporting Python packages include cffi 2.1.1 (MIT-0), charset-normalizer 3.5.2 (MIT), et_xmlfile 2.0.0 (MIT), lxml 6.1.3 (BSD-3-Clause with bundled XML library notices), pdfminer.six 20251230 (MIT), pycparser 3.12 (BSD-3-Clause), typing_extensions 4.16.0 (PSF-2.0), and XlsxWriter 3.3.0 (BSD-2-Clause). Python and packaging tools have their own supplied licenses.
 
 For the exact installed versions, preserve the package license files under `.venv/Lib/site-packages/*dist-info/licenses` and any package-level notices. In particular, the pypdfium2 wheel includes PDFium and dependency license texts under its `licenses/data/windows_x64/BUILD_LICENSES` directory. Its binding license alone does not cover every compiled dependency. Preserve the complete notices supplied with Pillow, cryptography, lxml, and ReportLab when packaging their wheels or runtime files.
+
+## HEIC/HEIF compression plugin
+
+This plugin is imported only for image compression. The wheel's `LICENSE.txt` and `LICENSES_bundled.txt` are retained under `licenses/python/pillow_heif-1.8.1.dist-info/licenses/`. Its notice identifies libheif 1.23.6 and libde265 1.1.3 (LGPLv3), x265 4.3 (GPLv2), and Windows runtime notices, with corresponding source links. The wheel is not an MIT/BSD-only runtime. Installed binaries are excluded from the source repository; preserve the supplied notices and applicable source/distribution requirements if packaging them.
 
 ## LibreOffice runtime
 

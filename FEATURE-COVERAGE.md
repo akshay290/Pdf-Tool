@@ -2,7 +2,7 @@
 
 Updated 27 October 2026. This maps the user's 35-item checklist to the implemented local app. It does not independently establish another product's catalog or claim commercial feature parity.
 
-**30 of 35 requested capabilities are implemented at least partially; 5 remain missing.** The interface contains **26 tools** because several checklist capabilities share a workflow. “Core present” means the described local operation exists; it does not imply every variation of that feature is supported.
+**30 of 35 requested capabilities are implemented at least partially; 5 remain missing.** The interface contains **28 tools**, including image compression and resizing; several PDF checklist capabilities share a workflow. “Core present” means the described local operation exists; it does not imply every variation of that feature is supported.
 
 The full regression run passed **100 tests, with 0 failures**. Modern and legacy Office conversions, multilingual OCR, structured exports, local APIs, and upgraded visual workflows are included. See [VALIDATION.md](VALIDATION.md) for the final test and browser evidence.
 
@@ -59,4 +59,3 @@ The full regression run passed **100 tests, with 0 failures**. Modern and legacy
 Complex layouts, unusual fonts, script shaping, scanned backgrounds, and OCR errors can affect conversion results. PDF-to-Office reconstruction and structured extraction require review for the user's documents. Conversion can recover some nested PDF text even though the direct editor deliberately rejects nested objects it cannot safely replace.
 
 The five missing checklist capabilities are a dedicated exact-copy tool, PDF/A, signature requests, camera scanning, and permanent redaction. The implemented local features do not establish full Smallpdf or iLovePDF parity.
-
