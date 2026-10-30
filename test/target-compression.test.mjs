@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { deflateSync } from 'node:zlib';
-import { PDFDocument, StandardFonts } from 'pdf-lib';
+import { decodePDFRawStream, PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, StandardFonts } from 'pdf-lib';
 import { runPython } from '../src/python-bridge.mjs';
 
 function crc32(buffer) {
@@ -13,10 +13,10 @@ function crc32(buffer) {
   return (value ^ 0xffffffff) >>> 0;
 }
 
-function noisePng(alpha = false, width = 320, height = 240) {
+function noisePng(alpha = false, width = 320, height = 240, initialSeed = 123456789) {
   const channels = alpha ? 4 : 3;
   const rows = Buffer.alloc(height * (1 + width * channels));
-  let seed = 123456789;
+  let seed = initialSeed;
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const offset = y * (1 + width * channels) + 1 + x * channels;
@@ -37,7 +37,21 @@ function noisePng(alpha = false, width = 320, height = 240) {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
 }
 
-async function richFixture({ alpha = false, pages = 2, form = false } = {}) {
+function ascii85(bytes) {
+  let encoded = '';
+  for (let offset = 0; offset < bytes.length; offset += 4) {
+    const count = Math.min(4, bytes.length - offset), group = Buffer.alloc(4);
+    bytes.copy(group, 0, offset, offset + count);
+    let value = group.readUInt32BE();
+    if (!value && count === 4) { encoded += 'z'; continue; }
+    const digits = Array(5);
+    for (let index = 4; index >= 0; index -= 1) { digits[index] = String.fromCharCode(value % 85 + 33); value = Math.floor(value / 85); }
+    encoded += digits.slice(0, count + 1).join('');
+  }
+  return Buffer.from(encoded + '~>');
+}
+
+async function richFixture({ alpha = false, pages = 2, form = false, wrappedImage = false } = {}) {
   const document = await PDFDocument.create();
   const image = await document.embedPng(noisePng(alpha));
   const font = await document.embedFont(StandardFonts.Helvetica);
@@ -50,6 +64,12 @@ async function richFixture({ alpha = false, pages = 2, form = false } = {}) {
     const field = document.getForm().createTextField('customer');
     field.setText('Ada');
     field.addToPage(document.getPage(0), { x: 20, y: 5, width: 90, height: 12 });
+  }
+  if (wrappedImage) {
+    await document.flush();
+    const stream = document.context.lookup(image.ref);
+    stream.dict.set(PDFName.of('Filter'), document.context.obj([PDFName.of('ASCII85Decode'), PDFName.of('FlateDecode')]));
+    document.context.assign(image.ref, PDFRawStream.of(stream.dict, ascii85(Buffer.from(stream.getContents()))));
   }
   return { name: 'image-rich.pdf', data: Buffer.from(await document.save()).toString('base64') };
 }
@@ -67,7 +87,7 @@ function checkResult(result, target, originalBytes) {
   return bytes;
 }
 
-test('target maximum preserves an already-small original, including documents above the raster page cap', { timeout: 120_000 }, async () => {
+test('target maximum preserves an already-small original, including long documents', { timeout: 120_000 }, async () => {
   const document = await PDFDocument.create();
   for (let index = 0; index < 45; index += 1) document.addPage([100, 100]);
   const raw = Buffer.from(await document.save());
@@ -121,6 +141,53 @@ test('opaque image optimization reaches a real maximum while preserving text and
   assert.match(text.text, /Selectable source page 2/);
 });
 
+test('long image-rich PDFs receive image optimization while preserving all pages, text and form fields', { timeout: 120_000 }, async () => {
+  const file = await richFixture({ pages: 45, form: true });
+  const original = Buffer.from(file.data, 'base64');
+  const target = 110_000;
+  assert.ok(original.length > target);
+  const result = await runPython('compress', { file, compression: 'target', targetBytes: target });
+  const bytes = checkResult(result, target, original.length);
+  assert.equal(result.targetReached, true);
+  assert.equal(result.compressionMethod, 'image-jpeg');
+  assert.equal(result.rasterized, false);
+  const document = await PDFDocument.load(bytes);
+  assert.equal(document.getPageCount(), 45);
+  assert.equal(document.getForm().getTextField('customer').getText(), 'Ada');
+  const text = await runPython('text', { file: { name: 'result.pdf', data: result.data } });
+  assert.match(text.text, /Selectable source page 45/);
+});
+
+test('embedded-image downsampling meets smaller targets without rasterizing text, page placement or forms', { timeout: 120_000 }, async () => {
+  const file = await richFixture({ form: true, wrappedImage: true });
+  const original = Buffer.from(file.data, 'base64');
+  const target = 14_000;
+  const result = await runPython('compress', { file, compression: 'target', targetBytes: target });
+  const bytes = checkResult(result, target, original.length);
+  assert.equal(result.targetReached, true);
+  assert.equal(result.compressionMethod, 'image-jpeg');
+  assert.equal(result.rasterized, false);
+  assert.ok(result.imageScale > 0 && result.imageScale < 1);
+  assert.match(result.resultMessage, /resolution and JPEG quality/);
+  const document = await PDFDocument.load(bytes);
+  assert.equal(document.getPageCount(), 2);
+  assert.deepEqual(document.getPages().map((page) => [page.getWidth(), page.getHeight()]), [[360, 280], [360, 280]]);
+  assert.equal(document.getForm().getTextField('customer').getText(), 'Ada');
+  const images = document.getPage(0).node.Resources().lookup(PDFName.of('XObject'), PDFDict);
+  const image = [...images.values()].map((ref) => document.context.lookup(ref)).find((object) => object.dict?.get(PDFName.of('Subtype'))?.toString() === '/Image');
+  const width = image.dict.get(PDFName.of('Width')).asNumber();
+  const height = image.dict.get(PDFName.of('Height')).asNumber();
+  assert.ok(width < 320 && height < 240 && Math.min(width, height) >= 64);
+  assert.ok(Math.abs(width / height - 4 / 3) < .02);
+  const contents = document.getPage(0).node.Contents();
+  const streams = contents instanceof PDFArray ? contents.asArray().map((reference) => document.context.lookup(reference, PDFRawStream)) : [contents];
+  const operators = streams.map((stream) => Buffer.from(decodePDFRawStream(stream).decode()).toString()).join('\n');
+  assert.match(operators, /1 0 0 1 20 20 cm/);
+  assert.match(operators, /320 0 0 240 0 0 cm/);
+  const text = await runPython('text', { file: { name: 'result.pdf', data: result.data } });
+  assert.match(text.text, /Selectable source page 2/);
+});
+
 test('raster fallback reaches a feasible maximum with page count and quality floor reported', { timeout: 120_000 }, async () => {
   const file = await richFixture({ alpha: true, pages: 1 });
   const original = Buffer.from(file.data, 'base64');
@@ -136,7 +203,30 @@ test('raster fallback reaches a feasible maximum with page count and quality flo
   assert.match(result.resultMessage, /Selectable text.*removed/);
 });
 
-test('impossible maxima and oversized-page-count searches return honest closest valid files', { timeout: 120_000 }, async () => {
+test('long masked-image PDFs rasterize page-at-a-time while preserving mixed page dimensions', { timeout: 120_000 }, async () => {
+  const source = await PDFDocument.create();
+  const dimensions = [];
+  for (let index = 0; index < 42; index += 1) {
+    const size = index % 2 ? [180, 132] : [144, 120];
+    dimensions.push(size);
+    const image = await source.embedPng(noisePng(true, 120, 90, 123456789 + index));
+    source.addPage(size).drawImage(image, { x: 0, y: 0, width: size[0], height: size[1] });
+  }
+  const original = Buffer.from(await source.save());
+  const target = 700_000;
+  assert.ok(original.length > target);
+  const result = await runPython('compress', { file: { name: 'long-scans.pdf', data: original.toString('base64') }, compression: 'target', targetBytes: target });
+  const bytes = checkResult(result, target, original.length);
+  assert.equal(result.targetReached, true);
+  assert.equal(result.compressionMethod, 'raster-jpeg');
+  assert.equal(result.rasterized, true);
+  const document = await PDFDocument.load(bytes);
+  assert.equal(document.getPageCount(), 42);
+  assert.deepEqual(document.getPages().map((page) => [page.getWidth(), page.getHeight()]), dimensions);
+  assert.ok(result.qualityDpi >= 72 && result.qualityJpeg >= 35);
+});
+
+test('impossible maxima and long-document searches return honest closest valid files', { timeout: 120_000 }, async () => {
   const file = await richFixture({ alpha: true, pages: 1 });
   const raw = Buffer.from(file.data, 'base64');
   const impossible = await runPython('compress', { file, compression: 'target', targetBytes: 1000 });
@@ -150,7 +240,7 @@ test('impossible maxima and oversized-page-count searches return honest closest 
   checkResult(capped, 1000, Buffer.from(large.data, 'base64').length);
   assert.equal(capped.targetReached, false);
   assert.equal(capped.rasterized, false);
-  assert.match(capped.resultMessage, /40 pages.*Split/s);
+  assert.match(capped.resultMessage, /could not be reached/);
   assert.equal((await PDFDocument.load(Buffer.from(capped.data, 'base64'))).getPageCount(), 41);
 });
 

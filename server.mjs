@@ -55,6 +55,15 @@ function sendDocument(response, result, name) {
   if (result.qualityJpeg != null) headers['X-Compression-Quality'] = String(result.qualityJpeg);
   if (result.attempts != null) headers['X-Compression-Attempts'] = String(result.attempts);
   if (result.compressionMethod) headers['X-Compression-Method'] = result.compressionMethod;
+  if (result.imageScale != null) headers['X-Image-Scale'] = String(result.imageScale);
+  if (result.imageWidth != null) headers['X-Image-Width'] = String(result.imageWidth);
+  if (result.imageHeight != null) headers['X-Image-Height'] = String(result.imageHeight);
+  if (result.imageFormat != null) headers['X-Image-Format'] = String(result.imageFormat);
+  if (result.imageFrames != null) headers['X-Image-Frames'] = String(result.imageFrames);
+  if (result.imageResized != null) headers['X-Image-Resized'] = String(result.imageResized);
+  if (result.imageQuality != null) headers['X-Image-Quality'] = String(result.imageQuality);
+  if (result.imageDpi != null) headers['X-Image-Dpi'] = String(result.imageDpi);
+  if (result.imageDpiEmbedded != null) headers['X-Image-Dpi-Embedded'] = String(result.imageDpiEmbedded);
   response.writeHead(200, headers);
   response.end(Buffer.from(result.bytes));
 }
@@ -161,7 +170,7 @@ export function createServer() {
           sendPdf(response, await tool.run(), tool.name);
           return;
         }
-        const pythonTools = new Set(['compress', 'render', 'protect', 'unlock', 'repair', 'text', 'compare', 'docx', 'pptx', 'xlsx', 'extract-images', 'compare-visual']);
+        const pythonTools = new Set(['compress', 'compress-image', 'resize-image', 'render', 'protect', 'unlock', 'repair', 'text', 'compare', 'docx', 'pptx', 'xlsx', 'extract-images', 'compare-visual']);
         const operation = url.pathname.slice('/api/'.length);
         if (pythonTools.has(operation)) {
           let payload = body;

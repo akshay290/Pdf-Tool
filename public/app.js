@@ -1,5 +1,5 @@
 const state = { mode: 'merge', files: [], busy: false, outputs: [], result: null, rotation: 90, watermarkText: 'DRAFT', opacity: '0.18', startNumber: '1', cropMargin: '24', compression: 'target', targetSize: '500', targetUnit: 'KB', renderFormat: 'jpg', renderDpi: '144', password: '', textFormat: 'txt', annotationText: '', page: '1', x: '36', y: '36', fontSize: '18', color: '#1e805b', signatureWidth: '160', signature: null, flattenForm: true, html: '<h1>My document</h1>\n<p>A fresh page, ready for your content.</p>' };
-Object.assign(state, { language: 'eng', conversionOcr: false, includeImages: false, renderMethod: 'pages', compareMethod: 'text', htmlMethod: 'paste', htmlUrl: '' });
+Object.assign(state, { language: 'eng', conversionOcr: false, includeImages: false, renderMethod: 'pages', compareMethod: 'text', htmlMethod: 'paste', htmlUrl: '', imageOutputFormat: 'auto', resizeWidth: '1280', resizeHeight: '1280', resizeUnit: 'px', resizeDpi: '300', resizeAspect: true, resizeCompress: false, resizeTargetSize: '100', resizeTargetUnit: 'KB', resizeOutputFormat: 'auto' });
 const picker = document.querySelector('#file-picker');
 const workspace = document.querySelector('#workspace-body');
 const toolHeading = document.querySelector('#tool-heading');
@@ -18,6 +18,8 @@ const modes = {
   crop: { title: 'Trim page edges', verb: 'Crop PDF', icon: '<span class="nav-icon icon-text">⌗</span>', intro: 'Choose a visible area on the page or trim equal margins from its edges.' },
   images: { title: 'Images to PDF', verb: 'Create PDF', icon: '<span class="nav-icon icon-text">▧</span>', intro: 'Collect JPG and PNG images into one PDF, with one image per page.' },
   compress: { title: 'Compress PDF', verb: 'Compress PDF', icon: '<span class="nav-icon icon-text">⇲</span>', intro: 'Choose the maximum file size you need, and let LocalFold try to bring your PDF under that limit.' },
+  compressImage: { title: 'Compress images', verb: 'Compress image', icon: '<span class="nav-icon icon-text">⇲</span>', intro: 'Choose a maximum size for your image. We preserve detail and original dimensions first, then resize only when needed to approach your target.' },
+  resizeImage: { title: 'Resize image', verb: 'Resize image', icon: '<span class="nav-icon icon-text">↔</span>', intro: 'Set image dimensions in pixels or centimetres, with optional file-size compression. Your chosen output dimensions stay fixed during compression.' },
   render: { title: 'PDF to images', verb: 'Export images', icon: '<span class="nav-icon icon-text">▧</span>', intro: 'Export page images, or extract the images embedded in your PDF, in one ZIP download.' },
   protect: { title: 'Protect PDF', verb: 'Protect PDF', icon: '<span class="nav-icon icon-text">⌑</span>', intro: 'Require a password to open your document, using AES-256 encryption.' },
   unlock: { title: 'Unlock PDF', verb: 'Unlock PDF', icon: '<span class="nav-icon icon-text">⚿</span>', intro: 'Remove password protection from a PDF using its existing password.' },
@@ -38,9 +40,10 @@ const modes = {
 };
 
 function multipleFiles() { return ['merge', 'images', 'compare', 'organize'].includes(state.mode); }
-function bypassInspection() { return ['unlock', 'repair', 'office'].includes(state.mode); }
-function inputFamily() { return state.mode === 'images' ? 'images' : state.mode === 'office' ? 'office' : 'pdf'; }
-function inputName() { return state.mode === 'images' ? 'images' : state.mode === 'office' ? 'document' : `PDF${multipleFiles() ? 's' : ''}`; }
+function imageTool() { return ['compressImage', 'resizeImage'].includes(state.mode); }
+function bypassInspection() { return ['unlock', 'repair', 'office', 'compressImage', 'resizeImage'].includes(state.mode); }
+function inputFamily() { return imageTool() ? 'compress-image' : state.mode === 'images' ? 'images' : state.mode === 'office' ? 'office' : 'pdf'; }
+function inputName() { return imageTool() ? 'image' : state.mode === 'images' ? 'images' : state.mode === 'office' ? 'document' : `PDF${multipleFiles() ? 's' : ''}`; }
 function readyToRun() {
   if (state.mode === 'html') return Boolean((state.htmlMethod === 'url' ? state.htmlUrl : state.html).trim());
   const loaded = state.files.every((file) => file.data && (file.pageCount || bypassInspection()));
@@ -84,6 +87,46 @@ function formatCompressionBytes(bytes) {
   return bytes >= 1000000 ? `${Number((bytes / 1000000).toFixed(6))} MB` : `${Number((bytes / 1000).toFixed(3))} KB`;
 }
 
+function resizeImageRequest(file) {
+  const width = Number(state.resizeWidth), height = Number(state.resizeHeight);
+  const unit = state.resizeUnit, dpi = unit === 'cm' ? Number(state.resizeDpi) : 300;
+  if (!['px', 'cm'].includes(unit)) throw new Error('Choose pixels or centimetres for the image dimensions.');
+  if (!String(state.resizeWidth).trim() || !String(state.resizeHeight).trim() || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) throw new Error('Enter a positive width and height.');
+  if (unit === 'px' && (!Number.isInteger(width) || !Number.isInteger(height))) throw new Error('Pixel width and height must be whole numbers.');
+  if (!Number.isFinite(dpi) || !Number.isInteger(dpi) || dpi < 36 || dpi > 1200) throw new Error('Choose a whole print resolution from 36 to 1200 DPI.');
+  const factor = unit === 'cm' ? dpi / 2.54 : 1;
+  const pixelWidth = Math.floor(width * factor + 0.5), pixelHeight = Math.floor(height * factor + 0.5);
+  if (pixelWidth < 1 || pixelHeight < 1 || pixelWidth > 30000 || pixelHeight > 30000) throw new Error('Choose dimensions between 1 and 30000 pixels per side after unit conversion.');
+  if (!state.resizeAspect && pixelWidth * pixelHeight > 50_000_000) throw new Error('Keep the resized image within 50 million pixels.');
+  if (!['auto', 'jpeg', 'png', 'webp', 'avif'].includes(state.resizeOutputFormat)) throw new Error('Choose Auto, JPEG, PNG, WebP, or AVIF output.');
+  const request = { file, width, height, unit, dpi, maintainAspectRatio: state.resizeAspect, outputFormat: state.resizeOutputFormat };
+  if (state.resizeCompress) {
+    const size = Number(state.resizeTargetSize), multiplier = { KB: 1000, MB: 1000000 }[state.resizeTargetUnit];
+    const target = Math.floor(size * multiplier);
+    if (!String(state.resizeTargetSize).trim() || !Number.isFinite(size) || !multiplier || !Number.isFinite(target) || target < 1000 || target > 16 * 1024 * 1024) throw new Error('Choose a file-size target from 1 KB to 16.777216 MB.');
+    request.targetBytes = target;
+  }
+  return request;
+}
+
+function resizeImageOptions() {
+  const cm = state.resizeUnit === 'cm';
+  return `<div class="range-panel"><label class="check-option"><input id="resize-aspect" type="checkbox" ${state.resizeAspect ? 'checked' : ''} ${state.busy ? 'disabled' : ''}>Maintain aspect ratio</label>${selectField('resize-unit', 'Dimension unit', state.resizeUnit, [['px', 'Pixels (px)'], ['cm', 'Centimetres (cm)']])}<p class="field-label">Width × Height</p><div class="field-grid">${textField('resize-width', 'Width', state.resizeWidth, '', `type="number" min="${cm ? '.001' : '1'}" step="${cm ? 'any' : '1'}" inputmode="decimal"`)}${textField('resize-height', 'Height', state.resizeHeight, '', `type="number" min="${cm ? '.001' : '1'}" step="${cm ? 'any' : '1'}" inputmode="decimal"`)}</div><p class="range-help">${state.resizeAspect ? 'Fit inside this width × height box while keeping the original aspect ratio. The actual width or height may be smaller; no cropping or padding.' : 'Use exactly this width and height. Changing the original aspect ratio stretches the image.'}</p>${cm ? textField('resize-dpi', 'Print resolution (DPI)', state.resizeDpi, 'Centimetres use this print resolution to calculate pixels. At 300 DPI, 5.08 cm equals 600 pixels.', 'type="number" min="36" max="1200" step="1"') : ''}<label class="check-option"><input id="resize-compress" type="checkbox" ${state.resizeCompress ? 'checked' : ''} ${state.busy ? 'disabled' : ''}>Compress image to a specific size (for example, 100 KB)</label>${state.resizeCompress ? `<div class="target-size-fields">${textField('resize-target-size', 'Maximum file size', state.resizeTargetSize, '', 'type="number" min="0.001" step="any" inputmode="decimal"')}${selectField('resize-target-unit', 'File-size unit', state.resizeTargetUnit, [['KB', 'KB'], ['MB', 'MB']])}</div><p class="range-help">File-size compression adjusts the encoding quality or format while keeping the resized pixel dimensions fixed. Some targets cannot be reached; the actual size and target status are reported.</p>` : ''}${selectField('resize-output-format', 'Download format', state.resizeOutputFormat, [['auto', 'Auto — choose a suitable format'], ['jpeg', 'JPEG — opaque photos'], ['png', 'PNG — transparent graphics'], ['webp', 'WebP'], ['avif', 'AVIF']], 'Transparency and supported animation/pages are retained; incompatible format changes are rejected.')}<p class="range-help">One image per task, up to 16 MB. Re-encoding applies image orientation and omits EXIF/GPS metadata. Pixel and frame limits apply; resizing cannot recover detail absent from the source.</p></div>`;
+}
+
+function convertResizeUnit(previous) {
+  const dpi = Number(state.resizeDpi);
+  if (!Number.isFinite(dpi) || dpi < 36 || dpi > 1200) return;
+  const factor = previous === 'px' ? 2.54 / dpi : dpi / 2.54;
+  for (const key of ['resizeWidth', 'resizeHeight']) {
+    const value = Number(state[key]);
+    if (String(state[key]).trim() && Number.isFinite(value) && value > 0) {
+      const converted = value * factor;
+      state[key] = String(state.resizeUnit === 'px' ? Math.floor(converted + 0.5) : Number(converted.toFixed(6)));
+    }
+  }
+}
+
 function showToast(message) {
   toast.textContent = message;
   toast.classList.add('show');
@@ -95,7 +138,7 @@ function fileRow(file, index) {
   const canReorder = multipleFiles();
   return `<div class="file-row" data-file-id="${file.id}">
     <span class="pdf-symbol ${file.kind === 'image' ? 'image-symbol' : ''}" aria-hidden="true"><b>${file.kind === 'image' ? 'IMG' : file.kind === 'office' ? file.name.split('.').pop().toUpperCase() : 'PDF'}</b><i></i></span>
-    <div class="file-info"><p class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</p><div class="file-meta"><span>${file.pageCount ? `${file.pageCount} ${file.pageCount === 1 ? 'page' : 'pages'}` : file.data && bypassInspection() ? (state.mode === 'unlock' ? 'Ready to unlock · page count checked after decryption' : state.mode === 'office' ? 'Ready to convert · page count checked after conversion' : 'Ready for recovery attempt') : 'Reading pages…'}</span><i class="meta-dot"></i><span>${formatBytes(file.size)}</span></div></div>
+    <div class="file-info"><p class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</p><div class="file-meta"><span>${imageTool() ? (file.data ? (state.mode === 'resizeImage' ? 'Ready to resize · dimensions checked locally' : 'Ready to compress · format checked locally') : 'Reading image…') : file.pageCount ? `${file.pageCount} ${file.pageCount === 1 ? 'page' : 'pages'}` : file.data && bypassInspection() ? (state.mode === 'unlock' ? 'Ready to unlock · page count checked after decryption' : state.mode === 'office' ? 'Ready to convert · page count checked after conversion' : 'Ready for recovery attempt') : 'Reading pages…'}</span><i class="meta-dot"></i><span>${formatBytes(file.size)}</span></div></div>
     <div class="file-actions" aria-label="File actions">
       ${canReorder ? `<button class="tiny-button" data-action="up" data-id="${file.id}" aria-label="Move ${escapeHtml(file.name)} up" ${state.busy || index === 0 ? 'disabled' : ''}>↑</button><button class="tiny-button" data-action="down" data-id="${file.id}" aria-label="Move ${escapeHtml(file.name)} down" ${state.busy || index === state.files.length - 1 ? 'disabled' : ''}>↓</button>` : ''}
       <button class="tiny-button remove" data-action="remove" data-id="${file.id}" aria-label="Remove ${escapeHtml(file.name)}" ${state.busy ? 'disabled' : ''}>×</button>
@@ -104,9 +147,9 @@ function fileRow(file, index) {
 }
 
 function fileQueue() {
-  return `<div class="queue-top"><span class="queue-title">${state.mode === 'merge' ? 'PDFs to merge' : state.mode === 'compare' ? 'Original PDF, then revised PDF' : state.mode === 'images' ? 'Images in page order' : state.mode === 'office' ? 'Selected Office document' : 'Selected PDF'}</span><span class="queue-count">${state.files.length} ${state.files.length === 1 ? 'file' : 'files'} · ${formatBytes(state.files.reduce((sum, file) => sum + file.size, 0))}</span></div>
+  return `<div class="queue-top"><span class="queue-title">${state.mode === 'merge' ? 'PDFs to merge' : state.mode === 'compare' ? 'Original PDF, then revised PDF' : imageTool() ? 'Selected image' : state.mode === 'images' ? 'Images in page order' : state.mode === 'office' ? 'Selected Office document' : 'Selected PDF'}</span><span class="queue-count">${state.files.length} ${state.files.length === 1 ? 'file' : 'files'} · ${formatBytes(state.files.reduce((sum, file) => sum + file.size, 0))}</span></div>
   <div class="file-list">${state.files.map(fileRow).join('')}</div>
-  <button class="choose-button add-more" data-action="choose" ${state.busy ? 'disabled' : ''}><span>＋</span> ${multipleFiles() ? `Add another ${state.mode === 'images' ? 'image' : 'PDF'}` : state.mode === 'office' ? 'Choose a different document' : 'Choose a different PDF'}</button>`;
+  <button class="choose-button add-more" data-action="choose" ${state.busy ? 'disabled' : ''}><span>＋</span> ${multipleFiles() ? `Add another ${state.mode === 'images' ? 'image' : 'PDF'}` : imageTool() ? 'Choose a different image' : state.mode === 'office' ? 'Choose a different document' : 'Choose a different PDF'}</button>`;
 }
 
 function textField(id, label, value, help, attributes = '') {
@@ -145,7 +188,9 @@ function toolOptions() {
   const file = state.files[0];
   if (!file?.data) return '';
   const pages = file.pageCount;
-  if (state.mode === 'compress') return `<div class="range-panel">${state.compression === 'target' ? `<div class="target-size-panel"><p class="field-label">Maximum file size</p><div class="target-size-fields">${textField('target-size', 'Size', state.targetSize, '', `type="number" min="${state.targetUnit === 'MB' ? '0.001' : '1'}" max="${state.targetUnit === 'MB' ? '16.777216' : '16777.216'}" step="any" inputmode="decimal"`)}${selectField('target-unit', 'Unit', state.targetUnit, [['KB', 'KB'], ['MB', 'MB']])}</div><p class="range-help">1 MB = 1,000 KB. We aim for a result at or below your target; files are not padded to an exact size.</p><p class="range-help">Some targets cannot be reached. Strong reductions may turn pages into images, removing selectable text and interactive forms. This image conversion supports up to 40 pages; longer PDFs can still try lossless optimization.</p></div>` : ''}<details class="placement-details"><summary>Advanced: compression method</summary><div class="range-panel">${selectField('compression', 'Method', state.compression, [['target', 'Target file size'], ['lossless', 'Lossless — preserve text and image quality'], ['balanced', 'Balanced — rasterize pages'], ['small', 'Smallest — lower resolution pages']], 'Lossless retains selectable text. Balanced and Smallest support up to 40 pages and turn pages into images, removing selectable text and interactive forms. Already optimized PDFs may not become smaller.')}</div></details></div>`;
+  if (state.mode === 'resizeImage') return resizeImageOptions();
+  if (state.mode === 'compressImage') return `<div class="range-panel"><div class="target-size-panel"><p class="field-label">Maximum file size</p><div class="target-size-fields">${textField('target-size', 'Size', state.targetSize, '', `type="number" min="${state.targetUnit === 'MB' ? '0.001' : '1'}" max="${state.targetUnit === 'MB' ? '16.777216' : '16777.216'}" step="any" inputmode="decimal"`)}${selectField('target-unit', 'Unit', state.targetUnit, [['KB', 'KB'], ['MB', 'MB']])}</div><p class="range-help">1 MB = 1,000 KB. We aim for a result at or below your target; files are not padded to an exact size.</p></div>${selectField('image-output-format', 'Download format', state.imageOutputFormat, [['auto', 'Auto — choose a suitable format'], ['jpeg', 'JPEG — photos, opaque images'], ['png', 'PNG — lossless, transparent graphics'], ['webp', 'WebP — efficient photos and graphics'], ['avif', 'AVIF — efficient modern image']], 'Auto keeps transparency and supported animation. JPEG requests with transparency and incompatible multi-frame conversions are refused rather than discarding content.')}<p class="range-help">Lossless options and full dimensions are tried before reducing quality or dimensions. Very small targets can reduce detail or remain out of reach; the result reports its actual size, format and dimensions.</p><p class="range-help">Re-encoded images omit EXIF/GPS metadata. An original retained within the target stays unchanged.</p><p class="crop-note">Common raster formats include JPEG, PNG, WebP, AVIF, GIF, TIFF, BMP, ICO, JPEG 2000 and HEIC/HEIF. Decoding is checked locally. Camera RAW and vector files are not universally supported.</p></div>`;
+  if (state.mode === 'compress') return `<div class="range-panel">${state.compression === 'target' ? `<div class="target-size-panel"><p class="field-label">Maximum file size</p><div class="target-size-fields">${textField('target-size', 'Size', state.targetSize, '', `type="number" min="${state.targetUnit === 'MB' ? '0.001' : '1'}" max="${state.targetUnit === 'MB' ? '16.777216' : '16777.216'}" step="any" inputmode="decimal"`)}${selectField('target-unit', 'Unit', state.targetUnit, [['KB', 'KB'], ['MB', 'MB']])}</div><p class="range-help">1 MB = 1,000 KB. We aim for a result at or below your target; files are not padded to an exact size.</p><p class="range-help">Some targets cannot be reached. Strong reductions may turn pages into images, removing selectable text and interactive forms. Long PDFs can also try embedded-image optimization and page-by-page compression within local processing limits. Difficult targets may return the closest tested result.</p></div>` : ''}<details class="placement-details"><summary>Advanced: compression method</summary><div class="range-panel">${selectField('compression', 'Method', state.compression, [['target', 'Target file size'], ['lossless', 'Lossless — preserve text and image quality'], ['balanced', 'Balanced — rasterize pages'], ['small', 'Smallest — lower resolution pages']], 'Lossless retains selectable text. Balanced and Smallest support up to 40 pages and turn pages into images, removing selectable text and interactive forms. Already optimized PDFs may not become smaller.')}</div></details></div>`;
   if (state.mode === 'render') return `<div class="range-panel">${selectField('render-method', 'Images to export', state.renderMethod, [['pages', 'Render every page'], ['embedded', 'Extract embedded images']], 'Embedded extraction saves original image objects instead of rendering full pages.')}<div class="field-grid">${selectField('render-format', 'Page image format', state.renderFormat, [['jpg', 'JPG'], ['png', 'PNG']], 'Page rendering: up to 40 pages per PDF.')}${selectField('render-dpi', 'Page resolution', state.renderDpi, [['72', '72 dpi — screen'], ['144', '144 dpi — standard'], ['200', '200 dpi — detailed']])}</div></div>`;
   if (['protect', 'unlock'].includes(state.mode)) return `<div class="range-panel">${textField('pdf-password', state.mode === 'protect' ? 'New document password' : 'Existing document password', state.password, state.mode === 'protect' ? 'Use at least 8 characters and at most 256 UTF-8 bytes. Keep this password safe. It is cleared after the protected file is ready.' : 'Enter the existing password, up to 256 UTF-8 bytes. It is cleared after a successful unlock.', 'type="password" autocomplete="off"')}${state.mode === 'protect' ? '<p class="range-help">Anyone opening the resulting PDF will need this password.</p>' : ''}</div>`;
   if (state.mode === 'text') return `<div class="range-panel">${selectField('text-format', 'Download format', state.textFormat, [['txt', 'Plain text (.txt)'], ['md', 'Markdown (.md)']], 'Up to 200 pages per PDF.')}<label class="check-option"><input id="include-images" type="checkbox" ${state.includeImages ? 'checked' : ''}>For Markdown, include linked images in a ZIP bundle</label></div>`;
@@ -189,7 +234,7 @@ function render() {
   const actionDisabled = state.busy || !readyToRun();
   const options = toolOptions();
   workspace.innerHTML = `<div class="tool-intro"><p class="subheading">${mode.title}</p><p class="subcopy">${mode.intro}</p></div>
-    ${state.mode === 'html' ? `<div class="range-panel">${selectField('html-method', 'Source', state.htmlMethod, [['paste', 'Paste HTML'], ['url', 'Capture a public web page']])}${state.htmlMethod === 'url' ? textField('html-url', 'Public page URL', state.htmlUrl, 'Public HTTP or HTTPS pages only. Pages requiring sign-in and private network addresses are not supported.', 'type="url" placeholder="https://example.com"') : `<label class="field-label" for="html-source">Your HTML</label><textarea class="range-input html-source" id="html-source" maxlength="200000" spellcheck="false" ${state.busy ? 'disabled' : ''}>${escapeHtml(state.html)}</textarea><p class="range-help">Paste up to 200,000 characters. Only content included here can appear in the PDF.</p>`}</div>` : state.files.length ? `<div class="file-selection">${fileQueue()}</div>` : `<div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Choose ${inputName()}"><span class="upload-art"><span class="upload-file"></span><span class="upload-cloud">↑</span></span><p class="drop-title">Drop your ${inputName()} here</p><p class="drop-subtitle">or choose from your device</p><button class="choose-button" data-action="choose"><span>＋</span> Choose ${inputName()}</button><p class="file-limits">Up to 16 MB per file · ${state.mode === 'images' ? 'JPG and PNG images' : state.mode === 'office' ? 'DOC, DOCX, XLS, XLSX, PPT, and PPTX documents' : 'PDF files'} only · 48 MB per task</p></div>`}
+    ${state.mode === 'html' ? `<div class="range-panel">${selectField('html-method', 'Source', state.htmlMethod, [['paste', 'Paste HTML'], ['url', 'Capture a public web page']])}${state.htmlMethod === 'url' ? textField('html-url', 'Public page URL', state.htmlUrl, 'Public HTTP or HTTPS pages only. Pages requiring sign-in and private network addresses are not supported.', 'type="url" placeholder="https://example.com"') : `<label class="field-label" for="html-source">Your HTML</label><textarea class="range-input html-source" id="html-source" maxlength="200000" spellcheck="false" ${state.busy ? 'disabled' : ''}>${escapeHtml(state.html)}</textarea><p class="range-help">Paste up to 200,000 characters. Only content included here can appear in the PDF.</p>`}</div>` : state.files.length ? `<div class="file-selection">${fileQueue()}</div>` : `<div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Choose ${inputName()}"><span class="upload-art"><span class="upload-file"></span><span class="upload-cloud">↑</span></span><p class="drop-title">Drop your ${inputName()} here</p><p class="drop-subtitle">or choose from your device</p><button class="choose-button" data-action="choose"><span>＋</span> Choose ${inputName()}</button><p class="file-limits">Up to 16 MB per file · ${imageTool() ? 'Common raster images · one image per task' : state.mode === 'images' ? 'JPG and PNG images only · 48 MB per task' : state.mode === 'office' ? 'DOC, DOCX, XLS, XLSX, PPT, and PPTX documents only · 48 MB per task' : 'PDF files only · 48 MB per task'}</p></div>`}
     ${options}
     ${studio.options()}
     <div id="page-limit-note">${pageLimitNote()}</div>
@@ -211,10 +256,13 @@ function renderResult() {
 }
 
 function wireWorkspaceEvents() {
-  for (const selector of ['#page-ranges', '#page-order', '#watermark-text', '#watermark-opacity', '#start-number', '#crop-margin', '#compression', '#target-size', '#target-unit', '#render-format', '#render-dpi', '#pdf-password', '#text-format', '#annotation-text', '#target-page', '#position-x', '#position-y', '#annotation-size', '#annotation-color', '#signature-width', '#flatten-form', '#html-source', '#ocr-language', '#conversion-ocr', '#include-images', '#render-method', '#compare-method', '#html-method', '#html-url', ...(state.files[0]?.formFields || []).map((_, index) => `#form-field-${index}`)]) {
+  for (const selector of ['#page-ranges', '#page-order', '#watermark-text', '#watermark-opacity', '#start-number', '#crop-margin', '#compression', '#target-size', '#target-unit', '#image-output-format', '#resize-width', '#resize-height', '#resize-unit', '#resize-dpi', '#resize-aspect', '#resize-compress', '#resize-target-size', '#resize-target-unit', '#resize-output-format', '#render-format', '#render-dpi', '#pdf-password', '#text-format', '#annotation-text', '#target-page', '#position-x', '#position-y', '#annotation-size', '#annotation-color', '#signature-width', '#flatten-form', '#html-source', '#ocr-language', '#conversion-ocr', '#include-images', '#render-method', '#compare-method', '#html-method', '#html-url', ...(state.files[0]?.formFields || []).map((_, index) => `#form-field-${index}`)]) {
     const input = workspace.querySelector(selector);
     for (const event of ['input', 'change']) input?.addEventListener(event, () => {
+      if (selector === '#resize-unit' && event === 'input') return;
+      const previousResizeUnit = state.resizeUnit;
       captureInputs();
+      if (selector === '#resize-unit' && event === 'change' && previousResizeUnit !== state.resizeUnit) convertResizeUnit(previousResizeUnit);
       invalidateResults();
       const run = workspace.querySelector('[data-action="run"]');
       if (run) run.disabled = state.busy || !readyToRun();
@@ -223,6 +271,7 @@ function wireWorkspaceEvents() {
       studio.refreshOverlay();
       if (selector === '#html-method') render();
       if (['#compression', '#target-unit'].includes(selector) && event === 'change') render();
+      if (['#resize-unit', '#resize-dpi', '#resize-aspect', '#resize-compress', '#resize-target-unit'].includes(selector) && event === 'change') render();
       if (selector === '#target-page' && event === 'change' && Number.isInteger(Number(state.page)) && Number(state.page) >= 1 && Number(state.page) <= state.files[0]?.pageCount) { studio.page = Number(state.page); render(); }
     });
   }
@@ -251,7 +300,7 @@ function wireWorkspaceEvents() {
 function openPicker() {
   if (state.busy) return;
   picker.multiple = multipleFiles();
-  picker.accept = state.mode === 'images' ? 'image/jpeg,image/png,.jpg,.jpeg,.png' : state.mode === 'office' ? '.doc,.docx,.xls,.xlsx,.ppt,.pptx' : 'application/pdf,.pdf';
+  picker.accept = imageTool() ? 'image/*,.jpg,.jpeg,.jpe,.jfif,.png,.apng,.webp,.avif,.gif,.tif,.tiff,.bmp,.dib,.ico,.icns,.jp2,.j2k,.jpx,.jpf,.tga,.ppm,.pgm,.pbm,.pnm,.pcx,.dds,.sgi,.rgb,.rgba,.bw,.ras,.xbm,.xpm,.psd,.heic,.heif,.qoi,.cur' : state.mode === 'images' ? 'image/jpeg,image/png,.jpg,.jpeg,.png' : state.mode === 'office' ? '.doc,.docx,.xls,.xlsx,.ppt,.pptx' : 'application/pdf,.pdf';
   picker.value = '';
   picker.click();
 }
@@ -326,12 +375,13 @@ async function addFiles(fileList) {
   if (state.busy) return;
   const incoming = Array.from(fileList || []);
   if (!incoming.length) return;
+  const imageCompression = imageTool();
   const images = state.mode === 'images';
   const office = state.mode === 'office';
-  const accepted = incoming.filter((file) => office ? /\.(docx?|xlsx?|pptx?)$/i.test(file.name) : images
+  const accepted = incoming.filter((file) => imageCompression ? /^image\//i.test(file.type) || /\.(jpe?g|jpe|jfif|png|apng|webp|avif|gif|tiff?|bmp|dib|ico|icns|jp2|j2k|jpx|jpf|tga|ppm|pgm|pbm|pnm|pcx|dds|sgi|rgb|rgba|bw|ras|xbm|xpm|psd|heic|heif|qoi|cur)$/i.test(file.name) : office ? /\.(docx?|xlsx?|pptx?)$/i.test(file.name) : images
     ? /\.(jpe?g|png)$/i.test(file.name) && (!file.type || ['image/jpeg', 'image/png'].includes(file.type))
     : file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'));
-  if (accepted.length !== incoming.length) showToast(office ? 'Choose a DOC, DOCX, XLS, XLSX, PPT, or PPTX document.' : images ? 'Choose JPG or PNG image files.' : 'Only PDF files can be added.');
+  if (accepted.length !== incoming.length) showToast(imageCompression ? 'Choose a supported raster image. The local engine checks its actual format.' : office ? 'Choose a DOC, DOCX, XLS, XLSX, PPT, or PPTX document.' : images ? 'Choose JPG or PNG image files.' : 'Only PDF files can be added.');
   const tooLarge = accepted.filter((file) => file.size > 16 * 1024 * 1024);
   if (tooLarge.length) showToast(`${tooLarge[0].name} is over the 16 MB per-file limit.`);
   let valid = accepted.filter((file) => file.size > 0 && file.size <= 16 * 1024 * 1024);
@@ -340,7 +390,7 @@ async function addFiles(fileList) {
   const merging = multipleFiles();
   if (!merging && valid.length > 1) {
     valid = valid.slice(0, 1);
-    showToast(`This tool processes one ${office ? 'document' : 'PDF'} at a time. The first file was selected.`);
+    showToast(`This tool processes one ${imageCompression ? 'image' : office ? 'document' : 'PDF'} at a time. The first file was selected.`);
   }
   const existing = merging ? state.files : [];
   const maxFiles = state.mode === 'compare' ? 2 : 12;
@@ -352,7 +402,7 @@ async function addFiles(fileList) {
     showToast('Keep the combined input size under 48 MB per task.');
     return;
   }
-  const added = valid.map((file) => ({ id: `file-${++sequence}`, file, name: file.name, size: file.size, kind: office ? 'office' : images ? 'image' : 'pdf', data: '', pageCount: 0, ranges: null, pageOrder: null, formFields: null }));
+  const added = valid.map((file) => ({ id: `file-${++sequence}`, file, name: file.name, size: file.size, kind: office ? 'office' : images || imageCompression ? 'image' : 'pdf', data: '', pageCount: 0, ranges: null, pageOrder: null, formFields: null }));
   state.files = [...existing, ...added];
   if (!merging) { state.page = '1'; studio.page = 1; studio.activeObject = null; studio.objects = []; }
   state.outputs = [];
@@ -428,9 +478,9 @@ function captureInputs() {
   }
   if (state.mode === 'number') state.startNumber = read('#start-number', state.startNumber);
   if (state.mode === 'crop') state.cropMargin = read('#crop-margin', state.cropMargin);
-  const options = { compression: '#compression', targetSize: '#target-size', targetUnit: '#target-unit', renderFormat: '#render-format', renderDpi: '#render-dpi', password: '#pdf-password', textFormat: '#text-format', annotationText: '#annotation-text', page: '#target-page', x: '#position-x', y: '#position-y', fontSize: '#annotation-size', color: '#annotation-color', signatureWidth: '#signature-width', html: '#html-source', language: '#ocr-language', renderMethod: '#render-method', compareMethod: '#compare-method', htmlMethod: '#html-method', htmlUrl: '#html-url' };
+  const options = { compression: '#compression', targetSize: '#target-size', targetUnit: '#target-unit', imageOutputFormat: '#image-output-format', resizeWidth: '#resize-width', resizeHeight: '#resize-height', resizeUnit: '#resize-unit', resizeDpi: '#resize-dpi', resizeTargetSize: '#resize-target-size', resizeTargetUnit: '#resize-target-unit', resizeOutputFormat: '#resize-output-format', renderFormat: '#render-format', renderDpi: '#render-dpi', password: '#pdf-password', textFormat: '#text-format', annotationText: '#annotation-text', page: '#target-page', x: '#position-x', y: '#position-y', fontSize: '#annotation-size', color: '#annotation-color', signatureWidth: '#signature-width', html: '#html-source', language: '#ocr-language', renderMethod: '#render-method', compareMethod: '#compare-method', htmlMethod: '#html-method', htmlUrl: '#html-url' };
   for (const [key, selector] of Object.entries(options)) state[key] = read(selector, state[key]);
-  for (const [key, id] of [['conversionOcr', 'conversion-ocr'], ['includeImages', 'include-images']]) state[key] = workspace.querySelector(`#${id}`)?.checked ?? state[key];
+  for (const [key, id] of [['conversionOcr', 'conversion-ocr'], ['includeImages', 'include-images'], ['resizeAspect', 'resize-aspect'], ['resizeCompress', 'resize-compress']]) state[key] = workspace.querySelector(`#${id}`)?.checked ?? state[key];
   studio.capture();
   if (state.mode === 'forms' && file?.formFields) {
     file.formFields.forEach((field, index) => {
@@ -470,6 +520,11 @@ function singleFileRequest() {
     return { file, margin };
   }
   if (state.mode === 'compress') return { file, compression: state.compression, ...(state.compression === 'target' ? { targetBytes: targetSizeBytes() } : {}) };
+  if (state.mode === 'compressImage') {
+    if (!['auto', 'jpeg', 'png', 'webp', 'avif'].includes(state.imageOutputFormat)) throw new Error('Choose Auto, JPEG, PNG, WebP, or AVIF output.');
+    return { file, targetBytes: targetSizeBytes(), outputFormat: state.imageOutputFormat };
+  }
+  if (state.mode === 'resizeImage') return resizeImageRequest(file);
   if (state.mode === 'render') return { file, format: state.renderFormat, dpi: Number(state.renderDpi) };
   if (state.mode === 'protect' || state.mode === 'unlock') {
     if (state.mode === 'protect' && Array.from(state.password).length < 8) throw new Error('Choose a password with at least 8 characters.');
@@ -535,15 +590,17 @@ async function runTool() {
       outputs = [{ name: 'localfold-rotated.pdf', pageCount: Number(response.headers.get('X-Page-Count')), blob: await response.blob() }];
       state.result = { title: 'Your rotated PDF is ready', note: `${outputs[0].pageCount} pages · Turned ${rotation}° clockwise` };
     } else {
-      const endpoint = state.mode === 'forms' ? 'forms-fill' : state.mode === 'render' && state.renderMethod === 'embedded' ? 'extract-images' : state.mode === 'compare' && state.compareMethod === 'visual' ? 'compare-visual' : state.mode === 'html' && state.htmlMethod === 'url' ? 'html-url' : state.mode;
+      const endpoint = state.mode === 'resizeImage' ? 'resize-image' : state.mode === 'compressImage' ? 'compress-image' : state.mode === 'forms' ? 'forms-fill' : state.mode === 'render' && state.renderMethod === 'embedded' ? 'extract-images' : state.mode === 'compare' && state.compareMethod === 'visual' ? 'compare-visual' : state.mode === 'html' && state.htmlMethod === 'url' ? 'html-url' : state.mode;
       const response = await api(studioRequest?.path || `/api/${endpoint}`, request);
       const filenames = { organize: 'arranged', watermark: 'watermarked', number: 'numbered', crop: 'cropped', images: 'images', compress: 'compressed', protect: 'protected', unlock: 'unlocked', repair: 'repaired', flatten: 'flattened', metadata: 'cleaned', annotate: 'annotated', forms: 'filled', sign: 'signed', ocr: 'searchable', html: 'document' };
-      const extension = ['docx', 'pptx', 'xlsx'].includes(state.mode) ? state.mode : state.mode === 'render' || state.mode === 'compare' && state.compareMethod === 'visual' || state.mode === 'text' && state.textFormat === 'md' && state.includeImages ? 'zip' : state.mode === 'text' ? state.textFormat : state.mode === 'compare' ? 'md' : 'pdf';
-      const fallback = ['docx', 'pptx', 'xlsx'].includes(state.mode) ? 'export' : state.mode === 'office' ? 'converted' : state.mode === 'render' ? 'pages' : state.mode === 'text' ? 'text' : state.mode === 'compare' ? 'comparison' : filenames[state.mode];
+      const imageFormat = (response.headers.get('X-Image-Format') || '').toLowerCase();
+      const imageExtension = { jpeg: 'jpg', jpg: 'jpg', png: 'png', webp: 'webp', avif: 'avif', gif: 'gif', tiff: 'tiff', bmp: 'bmp', ico: 'ico', jpeg2000: 'jp2', heic: 'heic', heif: 'heif' }[imageFormat] || { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif', 'image/tiff': 'tiff', 'image/bmp': 'bmp', 'image/x-icon': 'ico', 'image/jp2': 'jp2', 'image/heic': 'heic', 'image/heif': 'heif' }[(response.headers.get('Content-Type') || '').split(';')[0]] || 'img';
+      const extension = imageTool() ? imageExtension : ['docx', 'pptx', 'xlsx'].includes(state.mode) ? state.mode : state.mode === 'render' || state.mode === 'compare' && state.compareMethod === 'visual' || state.mode === 'text' && state.textFormat === 'md' && state.includeImages ? 'zip' : state.mode === 'text' ? state.textFormat : state.mode === 'compare' ? 'md' : 'pdf';
+      const fallback = state.mode === 'resizeImage' ? 'resized-image' : state.mode === 'compressImage' ? 'compressed-image' : ['docx', 'pptx', 'xlsx'].includes(state.mode) ? 'export' : state.mode === 'office' ? 'converted' : state.mode === 'render' ? 'pages' : state.mode === 'text' ? 'text' : state.mode === 'compare' ? 'comparison' : filenames[state.mode];
       const disposition = response.headers.get('Content-Disposition') || '';
       const suppliedName = disposition.match(/filename="?([^";]+)"?/)?.[1];
       const name = suppliedName && !/[\\/]/.test(suppliedName) ? suppliedName : `localfold-${fallback}.${extension}`;
-      const label = extension === 'docx' ? 'Word' : extension === 'pptx' ? 'Slides' : extension === 'xlsx' ? 'Spreadsheet' : extension === 'zip' ? 'ZIP' : extension === 'txt' ? 'text' : extension === 'md' ? (state.mode === 'compare' ? 'report' : 'Markdown') : 'PDF';
+      const label = imageTool() ? 'image' : extension === 'docx' ? 'Word' : extension === 'pptx' ? 'Slides' : extension === 'xlsx' ? 'Spreadsheet' : extension === 'zip' ? 'ZIP' : extension === 'txt' ? 'text' : extension === 'md' ? (state.mode === 'compare' ? 'report' : 'Markdown') : 'PDF';
       outputs = [{ name, label, pageCount: Number(response.headers.get('X-Page-Count')), blob: await response.blob() }];
       const titles = { organize: 'Your arranged PDF is ready', watermark: 'Your watermarked PDF is ready', number: 'Your numbered PDF is ready', crop: 'Your cropped PDF is ready', images: 'Your image PDF is ready', compress: 'Your compressed PDF is ready', render: 'Your page images are ready', protect: 'Your protected PDF is ready', unlock: 'Your unlocked PDF is ready', repair: 'Your recovered PDF is ready', text: 'Your extracted text is ready', compare: 'Your text comparison report is ready', flatten: 'Your flattened PDF is ready', metadata: 'Your cleaned PDF is ready', annotate: 'Your annotated PDF is ready', forms: 'Your filled PDF is ready', sign: 'Your signature has been placed', ocr: 'Your searchable PDF is ready', html: 'Your document PDF is ready' };
       let title = state.mode === 'rotate' ? 'Your rotated PDF is ready' : titles[state.mode];
@@ -575,6 +632,54 @@ async function runTool() {
           if (dpi > 0) note += ` · ${dpi} dpi`;
           if (quality > 0) note += ` · JPEG quality ${quality}`;
         }
+        if (response.headers.get('X-Compression-Method') === 'image-jpeg') {
+          note += ' · Selectable text and forms retained';
+          const scale = Number(response.headers.get('X-Image-Scale'));
+          if (scale > 0 && scale < 1) note += ' · Embedded image resolution reduced';
+        }
+      }
+      if (state.mode === 'compressImage') {
+        const before = state.files[0].size, after = outputs[0].blob.size, target = request.targetBytes;
+        const reached = response.headers.get('X-Target-Reached');
+        const met = reached === 'true' && after <= target;
+        const missed = reached === 'false' || after > target;
+        title = met ? 'Your image meets the target' : missed ? 'Closest available image' : 'Your image compression result';
+        resultStatus = met ? 'success' : 'partial';
+        note = `${formatCompressionBytes(before)} → ${formatCompressionBytes(after)} · Target: ${formatCompressionBytes(target)} · ${met ? 'Target met' : missed ? 'Target not reached' : 'Target status unavailable'}`;
+        if (imageFormat) note += ` · ${imageFormat.toUpperCase()}`;
+        const width = Number(response.headers.get('X-Image-Width')), height = Number(response.headers.get('X-Image-Height'));
+        if (Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0) note += ` · ${width} × ${height} px`;
+        const frames = Number(response.headers.get('X-Image-Frames'));
+        if (Number.isInteger(frames) && frames > 1) note += ` · ${frames} ${imageFormat === 'tiff' ? 'pages' : 'frames'} retained`;
+        const resized = response.headers.get('X-Image-Resized');
+        if (resized === 'true') note += ' · Dimensions reduced to approach target';
+        else if (resized === 'false') note += ' · Original dimensions retained';
+        const quality = Number(response.headers.get('X-Image-Quality'));
+        if (quality > 0 && quality <= 100) note += ` · Encoding quality ${quality}`;
+        if (response.headers.get('X-Compression-Method') === 'original') note += before <= target ? ' · Original already within target' : ' · Original retained to preserve content';
+      }
+      if (state.mode === 'resizeImage') {
+        const after = outputs[0].blob.size;
+        const width = Number(response.headers.get('X-Image-Width')), height = Number(response.headers.get('X-Image-Height'));
+        const validDimensions = Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0;
+        title = 'Your resized image is ready';
+        resultStatus = 'success';
+        note = `${validDimensions ? `${width} × ${height} px · ` : ''}${formatCompressionBytes(after)}${imageFormat ? ` · ${imageFormat.toUpperCase()}` : ''}`;
+        note += request.maintainAspectRatio ? ' · Aspect ratio maintained' : ' · Exact requested dimensions';
+        if (request.unit === 'cm' && validDimensions) {
+          const dpi = Number(response.headers.get('X-Image-Dpi')) || request.dpi;
+          note += ` · ${Number((width * 2.54 / dpi).toFixed(4))} × ${Number((height * 2.54 / dpi).toFixed(4))} cm at ${dpi} DPI`;
+        }
+        if (request.targetBytes !== undefined) {
+          const reached = response.headers.get('X-Target-Reached');
+          const met = reached === 'true' && after <= request.targetBytes;
+          const missed = reached === 'false' || after > request.targetBytes;
+          title = met ? 'Your resized image meets the target' : missed ? 'Image resized; size target not reached' : 'Your resized image is ready';
+          resultStatus = met ? 'success' : 'partial';
+          note += ` · Target: ${formatCompressionBytes(request.targetBytes)} · ${met ? 'Target met' : missed ? 'Target not reached' : 'Target status unavailable'} · Resized pixel dimensions kept fixed`;
+        }
+        const frames = Number(response.headers.get('X-Image-Frames'));
+        if (Number.isInteger(frames) && frames > 1) note += ` · ${frames} ${imageFormat === 'tiff' ? 'pages' : 'frames'} retained`;
       }
       state.result = { title, note, ...(resultStatus ? { status: resultStatus } : {}) };
       if (['office', 'docx', 'pptx', 'xlsx'].includes(state.mode)) {
@@ -634,7 +739,7 @@ function moveFile(id, direction) {
 const toolGroups = [
   ['Organize', ['merge', 'split', 'organize', 'rotate', 'crop']],
   ['Convert', ['images', 'render', 'office', 'docx', 'pptx', 'xlsx', 'text', 'html']],
-  ['Edit & improve', ['compress', 'watermark', 'number', 'annotate', 'sign', 'forms', 'flatten', 'ocr']],
+  ['Edit & improve', ['compress', 'compressImage', 'resizeImage', 'watermark', 'number', 'annotate', 'sign', 'forms', 'flatten', 'ocr']],
   ['Security & recovery', ['protect', 'unlock', 'metadata', 'repair']],
   ['Review', ['compare']],
 ];

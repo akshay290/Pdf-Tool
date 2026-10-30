@@ -65,7 +65,7 @@ function browser(handleRequest, { healthOk = true } = {}) {
   });
   workspace.querySelector = (selector) => fields.get(selector) || (selector === '[name="rotation"]:checked' ? rotations.find((input) => input.checked) : selector === '[data-action="run"]' ? runButton : null);
   workspace.querySelectorAll = (selector) => selector === '[name="rotation"]' ? rotations : selector === '[data-studio-action]' ? actions : selector === '[data-studio-tab]' ? tabs : selector === '[data-page-index]' ? tiles : [];
-  const nav = ['merge', 'split', 'rotate', 'organize', 'watermark', 'number', 'crop', 'images', 'compress', 'render', 'protect', 'unlock', 'repair', 'text', 'compare', 'flatten', 'metadata', 'annotate', 'forms', 'sign', 'ocr', 'html', 'office', 'docx', 'pptx', 'xlsx'].map((mode) => element({ mode }));
+  const nav = ['merge', 'split', 'rotate', 'organize', 'watermark', 'number', 'crop', 'images', 'compress', 'compressImage', 'resizeImage', 'render', 'protect', 'unlock', 'repair', 'text', 'compare', 'flatten', 'metadata', 'annotate', 'forms', 'sign', 'ocr', 'html', 'office', 'docx', 'pptx', 'xlsx'].map((mode) => element({ mode }));
   const nodes = new Map([['#workspace-body', workspace]]);
   const document = {
     querySelector(selector) { if (!nodes.has(selector)) nodes.set(selector, element()); return nodes.get(selector); },
@@ -119,6 +119,14 @@ function edit(app, selector, value) {
 
 function inspected(files) {
   return Response.json({ files: files.map((file, index) => ({ name: file.name.replace(':', '-'), pageCount: index + 4 })) });
+}
+
+function changeResizeField(app, selector, value) {
+  const field = app.workspace.querySelector(selector);
+  assert.ok(field, `Missing field ${selector}`);
+  if (typeof value === 'boolean') field.checked = value;
+  else field.value = value;
+  field.listeners.change({ target: field });
 }
 
 test('upload parses inspect JSON and associates normalized or duplicate names by order', async () => {
@@ -976,4 +984,252 @@ test('typed signature previews use selected font families and fit measured text 
   assert.match(app.execute('studio.signatureTextLayout(160).family'), /Arial/);
   app.execute('studio.fontStyle="monospace"');
   assert.match(app.execute('studio.signatureTextLayout(160).family'), /Courier New/);
+});
+
+test('PDF image downsampling reports retained text and forms with reduced image resolution', async () => {
+  const app = browser((path, body) => {
+    if (path === '/api/inspect') return inspected(body.files);
+    return new Response(new Uint8Array(14000), { headers: {
+      'X-Input-Bytes': '200000', 'X-Output-Bytes': '14000',
+      'X-Target-Bytes': String(body.targetBytes), 'X-Target-Reached': 'true',
+      'X-Rasterized': 'false', 'X-Compression-Method': 'image-jpeg', 'X-Image-Scale': '0.7',
+    } });
+  });
+  app.mode('compress'); await app.add([pdf('clear-text.pdf')]);
+  edit(app, '#target-size', '20'); await app.run();
+  assert.equal(app.state().result.title, 'Your PDF meets the target');
+  assert.match(app.state().result.note, /Selectable text and forms retained/);
+  assert.match(app.state().result.note, /Embedded image resolution reduced/);
+  assert.doesNotMatch(app.state().result.note, /Pages converted to images|forms removed/);
+});
+
+test('image compression accepts common raster inputs without PDF inspection and preserves target choices', async () => {
+  const requests = [];
+  const app = browser((path, body) => {
+    requests.push({ path, body });
+    return new Response(new Uint8Array(12000), { headers: {
+      'Content-Type': 'image/webp', 'Content-Disposition': 'attachment; filename="clear.webp"',
+      'X-Target-Reached': 'true', 'X-Image-Format': 'WEBP', 'X-Image-Width': '1200', 'X-Image-Height': '800',
+      'X-Image-Frames': '1', 'X-Image-Resized': 'false', 'X-Image-Quality': '91',
+    } });
+  });
+  app.mode('compressImage');
+  app.execute('openPicker()');
+  assert.match(app.execute('picker.accept'), /image\/\*/);
+  assert.match(app.execute('picker.accept'), /\.heic,\.heif/);
+  assert.equal(app.execute('picker.multiple'), false);
+  for (const name of ['photo.heic', 'photo.heif', 'photo.qoi', 'cursor.cur', 'photo.tiff']) {
+    await app.add([image(name, '', 'synthetic raster')]);
+    assert.equal(app.state().files[0].name, name);
+  }
+  assert.equal(requests.length, 0, 'Image inputs must not go through the PDF inspector');
+  assert.equal(app.state().files[0].kind, 'image');
+  assert.equal(app.workspace.querySelector('[data-action="run"]').disabled, false);
+  assert.match(app.workspace.innerHTML, /Selected image/);
+  edit(app, '#target-size', '0.025'); edit(app, '#target-unit', 'MB'); edit(app, '#image-output-format', 'webp');
+  app.render();
+  assert.equal(app.workspace.querySelector('#image-output-format').value, 'webp');
+  await app.run();
+  assert.deepEqual(requests[0], { path: '/api/compress-image', body: { file: { name: 'photo.tiff', data: Buffer.from('synthetic raster').toString('base64') }, targetBytes: 25000, outputFormat: 'webp' } });
+  assert.equal(app.state().outputs[0].name, 'clear.webp');
+  assert.equal(app.state().outputs[0].label, 'image');
+  assert.equal(app.state().outputs[0].blob.type, 'image/webp');
+  assert.equal(app.state().result.title, 'Your image meets the target');
+  assert.match(app.state().result.note, /12 KB · Target: 25 KB · Target met · WEBP · 1200 × 800 px/);
+  assert.match(app.state().result.note, /Original dimensions retained · Encoding quality 91/);
+  assert.match(app.workspace.innerHTML, /Download image/);
+  app.mode('images');
+  assert.equal(app.state().files.length, 0, 'The JPG/PNG-only Images to PDF workflow must not inherit TIFF inputs');
+  app.execute('openPicker()');
+  assert.equal(app.execute('picker.accept'), 'image/jpeg,image/png,.jpg,.jpeg,.png');
+  app.mode('compress');
+  assert.equal(app.state().imageOutputFormat, 'webp');
+  assert.equal(app.state().compression, 'target');
+});
+
+test('image results use measured download size and report missed targets, animation and resizing honestly', async () => {
+  const app = browser(() => new Response(new Uint8Array(2001), { headers: {
+    'Content-Type': 'image/webp', 'X-Output-Bytes': '999', 'X-Target-Reached': 'true',
+    'X-Image-Format': 'WEBP', 'X-Image-Width': '320', 'X-Image-Height': '240',
+    'X-Image-Frames': '3', 'X-Image-Resized': 'true',
+  } }));
+  app.mode('compressImage'); await app.add([image('animated.gif', 'image/gif')]);
+  edit(app, '#target-size', '2'); await app.run();
+  assert.equal(app.state().outputs[0].name, 'localfold-compressed-image.webp');
+  assert.equal(app.state().result.status, 'partial');
+  assert.equal(app.state().result.title, 'Closest available image');
+  assert.match(app.state().result.note, /2.001 KB · Target: 2 KB · Target not reached/);
+  assert.match(app.state().result.note, /320 × 240 px · 3 frames retained · Dimensions reduced/);
+  assert.doesNotMatch(app.state().result.note, /Target met|1 page|undefined|NaN/);
+  assert.match(app.workspace.innerHTML, /Download image/);
+});
+
+test('image compression validates target and output format before sending and keeps backend errors useful', async () => {
+  const requests = [];
+  const app = browser((path, body) => {
+    requests.push({ path, body });
+    return Response.json({ error: 'JPEG output would discard transparency. Choose Auto, PNG, WebP, or AVIF.' }, { status: 400 });
+  });
+  app.mode('compressImage'); await app.add([image('transparent.png')]);
+  for (const value of ['', '0.999', 'Infinity', '-10', '16777.217']) { edit(app, '#target-size', value); await app.run(); }
+  assert.equal(requests.length, 0);
+  edit(app, '#target-size', '20'); edit(app, '#image-output-format', 'invalid'); await app.run();
+  assert.equal(requests.length, 0);
+  edit(app, '#image-output-format', 'jpeg'); await app.run();
+  assert.equal(requests[0].body.outputFormat, 'jpeg');
+  assert.equal(app.state().busy, false);
+  assert.equal(app.state().outputs.length, 0);
+  assert.equal(app.state().result, null);
+  assert.match(app.execute('toast.textContent'), /would discard transparency/);
+});
+
+test('resize image reuses broad image input without PDF inspection and sends dimensions without an unwanted size target', async () => {
+  const requests = [];
+  const app = browser((path, body) => {
+    requests.push({ path, body });
+    return new Response(new Uint8Array(9000), { headers: {
+      'Content-Type': 'image/png', 'Content-Disposition': 'attachment; filename="resized.png"',
+      'X-Image-Format': 'png', 'X-Image-Width': '1280', 'X-Image-Height': '640', 'X-Image-Frames': '1',
+    } });
+  });
+  app.mode('compressImage'); await app.add([image('phone.heic', '', 'raster bytes')]);
+  app.mode('resizeImage');
+  assert.equal(app.state().files[0].name, 'phone.heic');
+  assert.equal(requests.length, 0);
+  assert.equal(app.state().resizeAspect, true);
+  assert.equal(app.state().resizeCompress, false);
+  assert.equal(app.workspace.querySelector('#resize-target-size'), null);
+  assert.match(app.workspace.innerHTML, /Maintain aspect ratio/);
+  assert.match(app.workspace.innerHTML, /Fit inside this width × height box/);
+  app.execute('openPicker()');
+  assert.match(app.execute('picker.accept'), /\.heic,\.heif/);
+  assert.equal(app.execute('picker.multiple'), false);
+  await app.run();
+  assert.deepEqual(requests[0], { path: '/api/resize-image', body: {
+    file: { name: 'phone.heic', data: Buffer.from('raster bytes').toString('base64') },
+    width: 1280, height: 1280, unit: 'px', dpi: 300, maintainAspectRatio: true, outputFormat: 'auto',
+  } });
+  assert.equal(app.state().outputs[0].name, 'resized.png');
+  assert.equal(app.state().outputs[0].label, 'image');
+  assert.equal(app.state().result.title, 'Your resized image is ready');
+  assert.match(app.state().result.note, /1280 × 640 px · 9 KB · PNG · Aspect ratio maintained/);
+  assert.doesNotMatch(app.state().result.note, /Target|undefined|NaN/);
+  app.mode('compressImage');
+  assert.equal(app.state().files[0].name, 'phone.heic');
+  assert.equal(app.state().targetSize, '500');
+  app.mode('images');
+  assert.equal(app.state().files.length, 0);
+});
+
+test('resize size compression is optional and reports a missed target without claiming altered dimensions', async () => {
+  const requests = [];
+  const app = browser((path, body) => {
+    requests.push({ path, body });
+    return new Response(new Uint8Array(120001), { headers: {
+      'Content-Type': 'image/png', 'X-Image-Format': 'png', 'X-Image-Width': '300', 'X-Image-Height': '200',
+      'X-Output-Bytes': '999', 'X-Target-Reached': 'true',
+    } });
+  });
+  app.mode('resizeImage'); await app.add([image('input.png')]);
+  edit(app, '#resize-width', '300'); edit(app, '#resize-height', '200');
+  changeResizeField(app, '#resize-aspect', false);
+  changeResizeField(app, '#resize-compress', true);
+  edit(app, '#resize-output-format', 'png');
+  assert.equal(app.workspace.querySelector('#resize-target-size').value, '100');
+  await app.run();
+  assert.equal(requests[0].body.targetBytes, 100000);
+  assert.equal(requests[0].body.maintainAspectRatio, false);
+  assert.equal(requests[0].body.width, 300);
+  assert.equal(requests[0].body.height, 200);
+  assert.equal(requests[0].body.outputFormat, 'png');
+  assert.equal(app.state().result.status, 'partial');
+  assert.equal(app.state().result.title, 'Image resized; size target not reached');
+  assert.match(app.state().result.note, /300 × 200 px · 120.001 KB/);
+  assert.match(app.state().result.note, /Exact requested dimensions · Target: 100 KB · Target not reached · Resized pixel dimensions kept fixed/);
+  assert.doesNotMatch(app.state().result.note, /Target met|Dimensions reduced to approach target/);
+  changeResizeField(app, '#resize-compress', false);
+  assert.equal(app.workspace.querySelector('#resize-target-size'), null);
+  await app.run();
+  assert.equal(Object.hasOwn(requests[1].body, 'targetBytes'), false);
+  assert.equal(app.state().result.status, 'success');
+  assert.doesNotMatch(app.state().result.note, /Target:/);
+});
+
+test('resize centimetres use explicit DPI and show the actual fitted physical dimensions', async () => {
+  const requests = [];
+  const app = browser((path, body) => {
+    requests.push({ path, body });
+    return new Response(new Uint8Array(4000), { headers: {
+      'Content-Type': 'image/webp', 'X-Image-Format': 'webp', 'X-Image-Width': '1200', 'X-Image-Height': '600',
+      'X-Image-Dpi': '600', 'X-Target-Reached': 'true',
+    } });
+  });
+  app.mode('resizeImage'); await app.add([image('input.webp', 'image/webp')]);
+  edit(app, '#resize-width', '600'); edit(app, '#resize-height', '600');
+  changeResizeField(app, '#resize-unit', 'cm');
+  assert.equal(app.workspace.querySelector('#resize-width').value, '5.08');
+  assert.equal(app.workspace.querySelector('#resize-height').value, '5.08');
+  assert.equal(app.workspace.querySelector('#resize-dpi').value, '300');
+  edit(app, '#resize-dpi', '600');
+  changeResizeField(app, '#resize-compress', true);
+  edit(app, '#resize-target-size', '0.005'); changeResizeField(app, '#resize-target-unit', 'MB');
+  app.render(); await app.run();
+  assert.equal(requests[0].body.unit, 'cm');
+  assert.equal(requests[0].body.dpi, 600);
+  assert.equal(requests[0].body.width, 5.08);
+  assert.equal(requests[0].body.height, 5.08);
+  assert.equal(requests[0].body.targetBytes, 5000);
+  assert.equal(app.state().result.title, 'Your resized image meets the target');
+  assert.match(app.state().result.note, /1200 × 600 px · 4 KB · WEBP · Aspect ratio maintained · 5.08 × 2.54 cm at 600 DPI/);
+  changeResizeField(app, '#resize-unit', 'px');
+  assert.equal(app.workspace.querySelector('#resize-width').value, '1200');
+  assert.equal(app.workspace.querySelector('#resize-height').value, '1200');
+  assert.equal(app.workspace.querySelector('#resize-dpi'), null);
+});
+
+test('resize validates dimensions and optional size independently before making a request', async () => {
+  const requests = [];
+  const app = browser((path, body) => {
+    requests.push({ path, body });
+    return new Response(new Uint8Array(1000), { headers: { 'X-Image-Format': 'png', 'X-Image-Width': '100', 'X-Image-Height': '100' } });
+  });
+  app.mode('resizeImage'); await app.add([image('input.png')]);
+  for (const width of ['', '0', '-1', '1.5', 'Infinity', '30001']) { edit(app, '#resize-width', width); await app.run(); }
+  assert.equal(requests.length, 0);
+  edit(app, '#resize-width', '100'); edit(app, '#resize-height', '100');
+  changeResizeField(app, '#resize-aspect', false);
+  edit(app, '#resize-width', '10000'); edit(app, '#resize-height', '10000'); await app.run();
+  assert.equal(requests.length, 0);
+  edit(app, '#resize-width', '100'); edit(app, '#resize-height', '100');
+  changeResizeField(app, '#resize-unit', 'cm');
+  for (const dpi of ['', '35', '1201', '300.5', 'NaN']) { edit(app, '#resize-dpi', dpi); await app.run(); }
+  assert.equal(requests.length, 0);
+  edit(app, '#resize-dpi', '300');
+  changeResizeField(app, '#resize-compress', true);
+  for (const value of ['', '0.5', 'Infinity', '16777.217']) { edit(app, '#resize-target-size', value); await app.run(); }
+  assert.equal(requests.length, 0);
+  changeResizeField(app, '#resize-compress', false);
+  await app.run();
+  assert.equal(requests.length, 1, 'An invalid hidden target must not block ordinary resizing');
+  assert.equal(Object.hasOwn(requests[0].body, 'targetBytes'), false);
+});
+
+test('resize keeps backend errors useful and allows returning to the existing image compressor', async () => {
+  const requests = [];
+  const app = browser((path, body) => {
+    requests.push({ path, body });
+    return Response.json({ error: 'This animation cannot be resized without changing its loop behavior.' }, { status: 400 });
+  });
+  app.mode('resizeImage'); await app.add([image('animated.avif', 'image/avif')]);
+  edit(app, '#resize-width', '320'); edit(app, '#resize-height', '240');
+  await app.run();
+  assert.equal(requests[0].path, '/api/resize-image');
+  assert.equal(app.state().busy, false);
+  assert.equal(app.state().outputs.length, 0);
+  assert.equal(app.state().files[0].name, 'animated.avif');
+  assert.match(app.execute('toast.textContent'), /loop behavior/);
+  app.mode('compressImage');
+  assert.equal(app.state().files[0].name, 'animated.avif');
+  assert.equal(app.state().resizeWidth, '320');
+  assert.equal(app.state().imageOutputFormat, 'auto');
 });

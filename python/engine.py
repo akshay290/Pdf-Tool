@@ -125,8 +125,8 @@ def _compress_target(raw, reader, target):
     """A maximum-size search, with content-preserving candidates preferred.
 
     Image JPEG candidates preserve page content/forms. Raster candidates render
-    once, downsample cached RGB pages, and never go below 72 DPI/JPEG quality 35.
-    The search is bounded to 70 seconds, 24 million cached pixels and 24 trials.
+    one page at a time and never go below 72 DPI/JPEG quality 35. Long documents
+    share the same 70-second/24-trial budget instead of an arbitrary page cap.
     """
     import math
     import time
@@ -134,7 +134,7 @@ def _compress_target(raw, reader, target):
     if type(target) is not int or not 1000 <= target <= MAX_INPUT:
         raise InputError("Choose a target maximum between 1000 and 16777216 bytes, as a whole number.")
     deadline = time.monotonic() + 70
-    best = {"bytes": raw, "method": "original", "dpi": None, "jpeg": None}
+    best = {"bytes": raw, "method": "original", "dpi": None, "jpeg": None, "imageScale": None}
     attempts = 0
 
     def package(candidate, reason=""):
@@ -148,23 +148,25 @@ def _compress_target(raw, reader, target):
                 "raster-jpeg": "The target maximum was reached by rasterizing pages. Selectable text and interactive form fields were removed.",
             }
             message = messages[method]
+            if method == "image-jpeg" and candidate.get("imageScale", 1) < 1:
+                message = "The target maximum was reached by reducing embedded image resolution and JPEG quality. Selectable text, vector graphics, page placement, and forms were preserved."
         else:
             message = "The target maximum could not be reached. The smallest tested valid PDF was returned without exceeding the original size. "
             if method == "raster-jpeg":
                 message += "This result rasterizes pages and removes selectable text and interactive form fields. "
             elif method == "image-jpeg":
-                message += "Embedded image quality was reduced while retaining text and forms. "
+                message += "Embedded image resolution and JPEG quality were reduced while retaining text and forms. " if candidate.get("imageScale", 1) < 1 else "Embedded image quality was reduced while retaining text and forms. "
             message += reason or "The local quality floor is 72 DPI and JPEG quality 35; use a larger maximum or split the document."
         return packed(candidate["bytes"], len(reader.pages), "localfold-compressed.pdf", inputBytes=len(raw),
                       outputBytes=len(candidate["bytes"]), reduced=len(candidate["bytes"]) < len(raw),
                       rasterized=method == "raster-jpeg", targetBytes=target, targetReached=reached,
                       qualityDpi=candidate["dpi"], qualityJpeg=candidate["jpeg"], attempts=attempts,
-                      compressionMethod=method, resultMessage=message)
+                      imageScale=candidate.get("imageScale"), compressionMethod=method, resultMessage=message)
 
-    def consider(data, method, dpi=None, quality=None):
+    def consider(data, method, dpi=None, quality=None, image_scale=None):
         nonlocal best, attempts
         attempts += 1
-        candidate = {"bytes": data, "method": method, "dpi": dpi, "jpeg": quality}
+        candidate = {"bytes": data, "method": method, "dpi": dpi, "jpeg": quality, "imageScale": image_scale}
         if len(data) < len(best["bytes"]):
             best = candidate
         return candidate
@@ -181,8 +183,6 @@ def _compress_target(raw, reader, target):
     except Exception:
         # A failure to optimize must not discard a readable original PDF.
         pass
-    if len(reader.pages) > 40:
-        return package(best, "Raster compression is limited to 40 pages. Split the PDF into smaller documents to try a smaller target maximum.")
     if not available():
         return package(best, "The bounded local search finished. Try a larger maximum or split the document.")
 
@@ -224,7 +224,14 @@ def _compress_target(raw, reader, target):
                     continue
                 if str(obj.get("/ColorSpace")) not in ("/DeviceRGB", "/DeviceGray") or obj.get("/BitsPerComponent", 8) != 8:
                     continue
-                if str(obj.get("/Filter")) not in ("/FlateDecode", "/DCTDecode"):
+                filters = obj.get("/Filter")
+                filters = [str(value) for value in filters] if isinstance(filters, (list, tuple)) else [str(filters)]
+                # ReportLab and other common producers wrap JPEG/Flate data in
+                # ASCII85 or ASCIIHex. These lossless transport filters do not
+                # change the image's color/mask eligibility or pixel budget.
+                if len(filters) == 2 and filters[0] in ("/ASCII85Decode", "/ASCIIHexDecode"):
+                    filters = filters[1:]
+                if len(filters) != 1 or filters[0] not in ("/FlateDecode", "/DCTDecode"):
                     continue
                 pixels += count
                 selected.append((page_index, path))
@@ -245,29 +252,45 @@ def _compress_target(raw, reader, target):
             except Exception:
                 continue
 
-        def image_candidate(quality):
+        def image_size(source, scale):
+            effective_scale = max(scale, min(1, 64 / min(source.size)))
+            return tuple(max(1, round(value * effective_scale)) for value in source.size)
+
+        def image_candidate(quality, scale=1):
             writer = PdfWriter()
             writer.clone_document_from_reader(reader)
+            used_scale = 1
             for page_index, path, source in source_images:
                 if not available():
                     return None
                 image_file = writer.pages[page_index].images[list(path)]
                 old = image_file.image
+                resized = None
                 try:
-                    image_file.replace(source, quality=quality, optimize=True)
+                    # Reduce only the image's pixels: its PDF placement matrix,
+                    # surrounding vector text and form fields stay untouched.
+                    # The shortest edge stops at 64px, with no upsampling of
+                    # already-small images and only one resized bitmap alive.
+                    size = image_size(source, scale)
+                    if size != source.size:
+                        resized = source.resize(size, Image.Resampling.LANCZOS)
+                        used_scale = min(used_scale, *(value / original for value, original in zip(size, source.size)))
+                    image_file.replace(resized or source, quality=quality, optimize=True)
                 finally:
+                    if resized is not None:
+                        resized.close()
                     old.close()
                     if image_file.image is not old:
                         image_file.image.close()
             writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
-            return consider(write_pdf(writer), "image-jpeg", quality=quality)
+            return consider(write_pdf(writer), "image-jpeg", quality=quality, image_scale=used_scale)
 
         def search_quality(make):
             """Find the highest tested JPEG quality fitting this resolution."""
             if not available():
                 return None
             high = make(95)
-            if high is None or len(high["bytes"]) <= target:
+            if high is not None and len(high["bytes"]) <= target:
                 return high
             if not available():
                 return None
@@ -290,9 +313,19 @@ def _compress_target(raw, reader, target):
 
         if source_images and available():
             try:
-                preserved = search_quality(image_candidate)
-                if preserved is not None:
-                    return package(preserved)
+                # Prefer the largest image resolution that can meet the target
+                # before considering destructive whole-page rasterization.
+                tested_sizes = set()
+                for scale in (1, .85, .7, .55, .4, .3, .2):
+                    if not available():
+                        break
+                    sizes = tuple(image_size(source, scale) for _, _, source in source_images)
+                    if sizes in tested_sizes:
+                        continue
+                    tested_sizes.add(sizes)
+                    preserved = search_quality(lambda quality: image_candidate(quality, scale))
+                    if preserved is not None:
+                        return package(preserved)
             except Exception:
                 # The raster fallback may handle a PDF with exotic image data.
                 pass
@@ -303,7 +336,6 @@ def _compress_target(raw, reader, target):
     if not available():
         return package(best, "The bounded local search finished. Try a larger maximum or split the document.")
 
-    pages = []
     try:
         with pdfium.PdfDocument(raw) as document:
             document.init_forms()
@@ -317,61 +349,53 @@ def _compress_target(raw, reader, target):
             possible = []
             for dpi in (144, 120, 96, 72):
                 counts = [math.ceil(width * dpi / 72) * math.ceil(height * dpi / 72) for width, height in sizes]
-                if all(min(size) > 0 for size in sizes) and max(counts) <= MAX_RENDER_PIXELS and sum(counts) <= 24_000_000:
+                # Rendering is page-at-a-time: the per-page cap bounds bitmap
+                # memory, while this separate whole-task cap bounds CPU work.
+                if all(min(size) > 0 for size in sizes) and max(counts) <= MAX_RENDER_PIXELS and sum(counts) <= 120_000_000:
                     possible.append(dpi)
             if not possible:
-                return package(best, "The pages exceed the local memory budget at the 72 DPI quality floor. Split the PDF or use a larger maximum.")
-            base_dpi = possible[0]
-            for index, (width, height) in enumerate(sizes):
+                return package(best, "The pages exceed the bounded local raster budget at the 72 DPI quality floor. Split the PDF or use a larger maximum.")
+
+            for dpi in possible:
                 if not available():
-                    return package(best, "The bounded local search finished before rasterization completed. Split the PDF or use a larger maximum.")
-                page = document[index]
-                bitmap = None
-                try:
-                    bitmap = page.render(scale=base_dpi / 72)
-                    image = bitmap.to_pil().convert("RGB")
-                    pages.append((image, width, height))
-                finally:
-                    if bitmap is not None:
-                        bitmap.close()
-                    page.close()
-
-        for dpi in possible:
-            if not available():
-                break
-            scaled = []
-            try:
-                for source, width, height in pages:
-                    image = source if dpi == base_dpi else source.resize((math.ceil(width * dpi / 72), math.ceil(height * dpi / 72)), Image.Resampling.LANCZOS)
-                    scaled.append((image, width, height))
-
+                    break
                 def raster_candidate(quality):
                     output = io.BytesIO()
                     pdf = canvas.Canvas(output, pageCompression=1)
-                    for image, width, height in scaled:
+                    encoded_bytes = 0
+                    for index, (width, height) in enumerate(sizes):
                         if not available():
                             return None
-                        encoded = io.BytesIO()
-                        image.save(encoded, format="JPEG", quality=quality, optimize=True)
-                        pdf.setPageSize((width, height))
-                        pdf.drawImage(ImageReader(io.BytesIO(encoded.getvalue())), 0, 0, width=width, height=height)
-                        pdf.showPage()
+                        page = document[index]
+                        bitmap = image = None
+                        try:
+                            bitmap = page.render(scale=dpi / 72)
+                            image = bitmap.to_pil().convert("RGB")
+                            encoded = io.BytesIO()
+                            image.save(encoded, format="JPEG", quality=quality, optimize=True)
+                            # ReportLab retains encoded image streams until
+                            # save. Bound those too, not only the live bitmap.
+                            encoded_bytes += encoded.tell()
+                            if encoded_bytes > MAX_OUTPUT:
+                                return None
+                            pdf.setPageSize((width, height))
+                            pdf.drawImage(ImageReader(io.BytesIO(encoded.getvalue())), 0, 0, width=width, height=height)
+                            pdf.showPage()
+                        finally:
+                            if image is not None:
+                                image.close()
+                            if bitmap is not None:
+                                bitmap.close()
+                            page.close()
                     pdf.save()
                     return consider(output.getvalue(), "raster-jpeg", dpi=dpi, quality=quality)
 
                 reached = search_quality(raster_candidate)
                 if reached is not None:
                     return package(reached)
-            finally:
-                for image, _, _ in scaled:
-                    if dpi != base_dpi:
-                        image.close()
     except Exception:
         # The validated original/best candidate remains a usable honest result.
         return package(best, "Some page content could not be rasterized within the local limits. Try a larger maximum or split the PDF.")
-    finally:
-        for image, _, _ in pages:
-            image.close()
     if not available():
         return package(best, "The bounded local search ended before every quality setting could be tested. Try a larger maximum or split the PDF.")
     return package(best)
@@ -594,6 +618,18 @@ def office_check(payload):
 
 
 def run(operation, payload):
+    if operation == "resize-image":
+        from image_resize import resize_image, ImageResizeError
+        try:
+            return resize_image(payload)
+        except ImageResizeError as error:
+            raise InputError(str(error)) from None
+    if operation == "compress-image":
+        from image_compression import compress_image, ImageCompressionError
+        try:
+            return compress_image(payload)
+        except ImageCompressionError as error:
+            raise InputError(str(error)) from None
     operations = {"compress": compress, "protect": protect, "unlock": unlock, "repair": repair,
                   "text": text_output, "compare": compare, "render": render}
     if operation in operations:

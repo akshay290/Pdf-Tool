@@ -1,8 +1,10 @@
 # Third-party notices
 
-Copies of 62 installed JavaScript and Python dependency notice files are preserved in `licenses/javascript/` and `licenses/python/`. The original notices also remain with the installed packages. See `DEPENDENCIES.md` for versions, sources, and the separate LibreOffice runtime license and source information.
+Copies of 64 installed JavaScript and Python dependency notice files are preserved in `licenses/javascript/` and `licenses/python/`. The original notices also remain with the installed packages. See `DEPENDENCIES.md` for versions, sources, and the separate LibreOffice runtime license and source information.
 
 The six OCR model files retain the Apache-2.0 license in `runtime/tessdata/LICENSE`. Setup pins the official tessdata_fast revision `87416418657359cb625c412a48b6e1d6d41c29bd` and checks each model against `python/ocr-models.json`. Installed system fonts used for text substitution are not redistributed by this project.
+
+The image compressor additionally uses pillow-heif 1.8.1. Its BSD-3-Clause source license and separate GPLv2 wheel/component notices are preserved in `licenses/python/pillow_heif-1.8.1.dist-info/licenses/`, including corresponding source links. See `DEPENDENCIES.md` for its HEIC/HEIF scope. Setup installs its runtime binaries; they are not committed.
 
 ## pdf-lib 1.17.1
 
